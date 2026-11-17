@@ -1,0 +1,158 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+img,
+video,
+canvas {
+  max-width: 100%;
+}
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+.home-header-controls {
+  gap: clamp(8px, 1.5vw, 16px) !important;
+}
+
+.home-main {
+  min-height: 0;
+}
+
+.home-hero,
+.home-panel {
+  min-width: 0;
+}
+
+.home-illustration {
+  width: clamp(200px, 48vw, 720px) !important;
+}
+
+@media (max-width: 1024px) {
+  .home-main {
+    flex-direction: column;
+    overflow: visible !important;
+    padding: 16px !important;
+  }
+
+  .home-hero {
+    flex: 0 0 auto !important;
+    min-height: 500px;
+    border-radius: 20px !important;
+  }
+
+  .home-hero-content {
+    height: auto !important;
+    min-height: 500px;
+  }
+
+  .home-quote {
+    display: none;
+  }
+
+  .home-illustration {
+    width: min(72vw, 360px) !important;
+    max-width: 72%;
+  }
+
+  .home-copy {
+    width: 100%;
+    max-width: none !important;
+    margin-left: 0 !important;
+    padding: 32px 20px 230px !important;
+    text-align: center;
+  }
+
+  .home-panel {
+    width: 100% !important;
+    flex: 0 0 auto;
+  }
+
+  .home-features {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .home-header {
+    height: auto !important;
+    min-height: 60px;
+    gap: 8px;
+    padding: 8px 12px !important;
+  }
+
+  .home-logo {
+    width: clamp(120px, 40vw, 190px) !important;
+  }
+
+  .home-rfid-status {
+    padding: 6px !important;
+    font-size: 0 !important;
+  }
+
+  .home-header-divider {
+    display: none;
+  }
+
+  .home-visitor-label {
+    font-size: 11px !important;
+  }
+
+  .home-main {
+    padding: 12px !important;
+    gap: 12px !important;
+  }
+
+  .home-hero,
+  .home-hero-content {
+    min-height: 450px;
+  }
+
+  .home-copy {
+    padding: 28px 16px 205px !important;
+  }
+
+  .home-copy h1 {
+    font-size: 30px !important;
+  }
+
+  .home-copy p {
+    font-size: 14px !important;
+  }
+
+  .home-scanner-card {
+    padding: 20px 16px !important;
+  }
+}
