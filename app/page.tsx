@@ -10,6 +10,7 @@ import {
   Leaf,
   ShieldCheck,
   UserRound,
+  Volume2,
 } from "lucide-react";
 import { useLibrary } from "../context/LibraryContext";
 import type { MemberCategory } from "../context/LibraryContext";
@@ -39,13 +40,23 @@ const PRODI_ITK = [
   "Tamu / Eksternal",
 ];
 
+function speakWelcomeMessage() {
+  if (!("speechSynthesis" in window)) return false;
+
+  const synthesis = window.speechSynthesis;
+  const utterance = new SpeechSynthesisUtterance("Selamat datang di perpustakaan");
+  utterance.lang = "id-ID";
+  utterance.voice = synthesis.getVoices()
+    .find((voice) => voice.lang.toLowerCase().startsWith("id")) ?? null;
+  synthesis.speak(utterance);
+  return true;
+}
 
 export default function Home() {
-  const { members, rfidUid, rfidActive, connectionStatus, addMember } = useLibrary();
+  const { members, rfidUid, rfidScanVersion, rfidActive, connectionStatus, addMember } = useLibrary();
   const [welcomeVisible, setWelcomeVisible] = useState(false);
-  const lastUid = useRef<string | null>(null);
-  const welcomeAudioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUnlockedRef = useRef(false);
+  const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
+  const lastProcessedScanVersion = useRef(rfidScanVersion);
 
   // Inline registration form state
   const [showForm, setShowForm] = useState(false);
@@ -88,55 +99,31 @@ export default function Home() {
     (member) => member.rfidTag.replace(/\s/g, "").toUpperCase() === rfidUid
   );
 
-  useEffect(() => {
-    const unlockAudio = () => {
-      const welcomeAudio = welcomeAudioRef.current;
-      if (!welcomeAudio || audioUnlockedRef.current) return;
-
-      welcomeAudio.muted = true;
-      void welcomeAudio.play()
-        .then(() => {
-          welcomeAudio.pause();
-          welcomeAudio.currentTime = 0;
-          welcomeAudio.muted = false;
-          audioUnlockedRef.current = true;
-        })
-        .catch(() => {
-          welcomeAudio.muted = false;
-        });
-    };
-
-    document.addEventListener("pointerdown", unlockAudio);
-    document.addEventListener("keydown", unlockAudio);
-    return () => {
-      document.removeEventListener("pointerdown", unlockAudio);
-      document.removeEventListener("keydown", unlockAudio);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!rfidUid || rfidUid === lastUid.current) return;
-    lastUid.current = rfidUid;
-    if (!scannedMember) return;
-    const welcomeAudio = welcomeAudioRef.current;
-    if (welcomeAudio) {
-      welcomeAudio.currentTime = 0;
-      void welcomeAudio.play().catch(() => undefined);
+  const enableNotificationSound = () => {
+    if (!("speechSynthesis" in window)) {
+      console.warn("Welcome speech is not supported by this browser.");
+      return;
     }
+    setNotificationSoundEnabled(true);
+  };
+
+  useEffect(() => {
+    if (!rfidUid || rfidScanVersion === lastProcessedScanVersion.current) return;
+    lastProcessedScanVersion.current = rfidScanVersion;
+    if (notificationSoundEnabled) speakWelcomeMessage();
     const showWelcome = window.setTimeout(() => setWelcomeVisible(true), 0);
     const hideWelcome = window.setTimeout(() => setWelcomeVisible(false), 7000);
     return () => {
       window.clearTimeout(showWelcome);
       window.clearTimeout(hideWelcome);
     };
-  }, [rfidUid, scannedMember]);
+  }, [notificationSoundEnabled, rfidScanVersion, rfidUid, scannedMember]);
 
   return (
     <div
       className="home-shell"
       style={{ minHeight: "100svh", display: "flex", flexDirection: "column", overflowX: "hidden", background: "#e8f2fb", fontFamily: "sans-serif", position: "relative" }}
     >
-      <audio ref={welcomeAudioRef} src="/assets/sambutan.mp4" preload="auto" />
       {/* â”€â”€ Decorative SVG waves â”€â”€ */}
       <svg
         aria-hidden="true"
@@ -216,6 +203,27 @@ export default function Home() {
             />
             Sistem RFID {rfidActive && connectionStatus === "Connected" ? "Aktif" : "Menghubungkan"}
           </div>
+          <button
+            type="button"
+            aria-pressed={notificationSoundEnabled}
+            onClick={enableNotificationSound}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              border: "1px solid #bfdbfe",
+              borderRadius: 999,
+              padding: "6px 12px",
+              background: notificationSoundEnabled ? "#ecfdf5" : "white",
+              color: notificationSoundEnabled ? "#047857" : "#1d4ed8",
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            <Volume2 size={15} />
+            {notificationSoundEnabled ? "Suara sambutan aktif" : "Aktifkan suara"}
+          </button>
           <div className="home-header-divider" style={{ width: 1, height: 20, background: "#e2e8f0" }} />
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700, color: "#0f2346", cursor: "pointer" }}>
             <UserRound size={17} />
@@ -456,7 +464,7 @@ export default function Home() {
                       <p style={{ marginTop: 4, fontSize: 13, fontWeight: 600, color: "#64748b" }}>di Perpustakaan ITK</p>
                       <p style={{ marginTop: 8, fontSize: 11, color: "#94a3b8" }}>RFID: {rfidUid}</p>
                     </>
-                  ) : rfidUid && !scannedMember ? (
+                  ) : welcomeVisible && rfidUid && !scannedMember ? (
                     <>
                       <div style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 999, background: "#fee2e2", padding: "5px 14px", fontSize: 11, fontWeight: 700, color: "#991b1b" }}>
                         Kartu Belum Terdaftar

@@ -102,6 +102,32 @@ function playWarningTone() {
   }
 }
 
+function playVerifiedTone() {
+  try {
+    const audioContext = new window.AudioContext();
+    const oscillator = audioContext.createOscillator();
+    const volume = audioContext.createGain();
+    const startTime = audioContext.currentTime;
+
+    oscillator.type = "sine";
+    [1318, 1760].forEach((frequency, index) => {
+      const toneStart = startTime + index * 0.14;
+      oscillator.frequency.setValueAtTime(frequency, toneStart);
+      volume.gain.setValueAtTime(0.0001, toneStart);
+      volume.gain.exponentialRampToValueAtTime(0.18, toneStart + 0.015);
+      volume.gain.setValueAtTime(0.18, toneStart + 0.09);
+      volume.gain.exponentialRampToValueAtTime(0.0001, toneStart + 0.13);
+    });
+    oscillator.connect(volume);
+    volume.connect(audioContext.destination);
+    oscillator.start(startTime);
+    oscillator.stop(startTime + 0.28);
+    oscillator.addEventListener("ended", () => void audioContext.close(), { once: true });
+  } catch {
+    return;
+  }
+}
+
 export default function PeminjamanPage() {
   const { members, books, loans, borrowBook, returnBook, rfidUid, rfidScanVersion, connectionStatus } = useLibrary();
   const today = toDateInputValue(new Date());
@@ -300,7 +326,11 @@ export default function PeminjamanPage() {
       tag: selectedGateTarget.tag,
       detectedAt: new Date().toLocaleTimeString("id-ID"),
     });
-    if (!tagIsVerified) playWarningTone();
+    if (tagIsVerified) {
+      playVerifiedTone();
+    } else {
+      playWarningTone();
+    }
   };
 
   const filters: LoanFilter[] = ["Aktif", "Terlambat", "Riwayat"];
