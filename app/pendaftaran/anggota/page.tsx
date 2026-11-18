@@ -60,7 +60,6 @@ export default function PendaftaranAnggotaPage() {
   const [viewingMember, setViewingMember] = useState<Member | null>(null);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
   const [crudError, setCrudError] = useState("");
-  const [crudNotice, setCrudNotice] = useState("");
   const [saving, setSaving] = useState(false);
 
   // Export Modal State
@@ -117,9 +116,8 @@ export default function PendaftaranAnggotaPage() {
 
     setSaving(true);
     setCrudError("");
-    setCrudNotice("");
     try {
-      const storage = await addMember({
+      await addMember({
         nim,
         nama,
         prodi,
@@ -136,9 +134,6 @@ export default function PendaftaranAnggotaPage() {
       setRfidTag("");
       setStatus("Mahasiswa");
       setShowAddModal(false);
-      if (storage === "local") {
-        setCrudNotice("Data anggota tersimpan di browser ini untuk uji coba. Data belum terkirim ke database.");
-      }
     } catch (error) {
       console.error("Supabase member insert failed:", error);
       setCrudError(getDatabaseErrorMessage(error, "Gagal menyimpan anggota ke database."));
@@ -241,12 +236,6 @@ export default function PendaftaranAnggotaPage() {
           {crudError}
         </div>
       )}
-      {crudNotice && (
-        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800">
-          {crudNotice}
-        </div>
-      )}
-
       {/* STATISTICAL BAR (KPI Cards synchronized in Realtime) */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {/* Card 1: Total Anggota (Neutral Dark / Slate) */}

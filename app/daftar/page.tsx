@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { CheckCircle2, ChevronDown, UserRound, ArrowLeft } from "lucide-react";
 import { useLibrary } from "../../context/LibraryContext";
@@ -48,6 +48,8 @@ function DaftarForm() {
     noHp: "",
   });
   const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const validate = () => {
@@ -60,22 +62,30 @@ function DaftarForm() {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validate()) return;
 
-    addMember({
-      nim: form.nim,
-      nama: form.nama,
-      prodi: form.prodi,
-      email: form.email || `${form.nim}@student.itk.ac.id`,
-      noHp: form.noHp || "-",
-      rfidTag: rfidFromUrl || "-",
-      status: form.status as MemberCategory,
-    });
+    setSubmitting(true);
+    setSubmitError("");
+    try {
+      await addMember({
+        nim: form.nim,
+        nama: form.nama,
+        prodi: form.prodi,
+        email: form.email || `${form.nim}@student.itk.ac.id`,
+        noHp: form.noHp || "-",
+        rfidTag: rfidFromUrl || "-",
+        status: form.status as MemberCategory,
+      });
 
-    setSubmitted(true);
-    setTimeout(() => router.push("/"), 3000);
+      setSubmitted(true);
+      setTimeout(() => router.push("/"), 3000);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Gagal menyimpan data anggota.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   if (submitted) {
@@ -224,6 +234,7 @@ function DaftarForm() {
         </div>
         {errors.status && <p style={errorStyle}>{errors.status}</p>}
       </div>
+        {submitError && <p role="alert" style={errorStyle}>{submitError}</p>}
 
       {/* Email (opsional) */}
       <div>
@@ -252,6 +263,7 @@ function DaftarForm() {
       {/* Submit */}
       <button
         type="submit"
+        disabled={submitting}
         style={{
           marginTop: 4,
           padding: "13px 0",
@@ -261,13 +273,13 @@ function DaftarForm() {
           color: "white",
           fontSize: 14,
           fontWeight: 700,
-          cursor: "pointer",
+          cursor: submitting ? "wait" : "pointer",
           boxShadow: "0 4px 14px rgba(21,98,232,0.35)",
           transition: "opacity 0.2s",
           letterSpacing: "0.02em",
         }}
       >
-        Daftarkan Anggota
+        {submitting ? "Menyimpan..." : "Daftarkan Anggota"}
       </button>
     </form>
   );

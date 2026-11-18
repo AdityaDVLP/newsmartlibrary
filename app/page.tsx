@@ -8,12 +8,14 @@ import {
   CheckCircle2,
   ChevronDown,
   Leaf,
+  LogOut,
   ShieldCheck,
   UserRound,
   Volume2,
 } from "lucide-react";
 import { useLibrary } from "../context/LibraryContext";
 import type { MemberCategory } from "../context/LibraryContext";
+import { supabase } from "../lib/supabase";
 
 const PRODI_ITK = [
   "Informatika",
@@ -40,11 +42,11 @@ const PRODI_ITK = [
   "Tamu / Eksternal",
 ];
 
-function speakWelcomeMessage() {
+function speakMessage(message: string) {
   if (!("speechSynthesis" in window)) return false;
 
   const synthesis = window.speechSynthesis;
-  const utterance = new SpeechSynthesisUtterance("Selamat datang di perpustakaan");
+  const utterance = new SpeechSynthesisUtterance(message);
   utterance.lang = "id-ID";
   utterance.voice = synthesis.getVoices()
     .find((voice) => voice.lang.toLowerCase().startsWith("id")) ?? null;
@@ -53,14 +55,18 @@ function speakWelcomeMessage() {
 }
 
 export default function Home() {
-  const { members, rfidUid, rfidScanVersion, rfidActive, connectionStatus, addMember } = useLibrary();
+  const { members, membersLoaded, rfidUid, rfidScanVersion, rfidActive, connectionStatus, addMember } = useLibrary();
   const [welcomeVisible, setWelcomeVisible] = useState(false);
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
+  const [signOutError, setSignOutError] = useState("");
   const lastProcessedScanVersion = useRef(rfidScanVersion);
+  const lastSpokenScanVersion = useRef(rfidScanVersion);
 
   // Inline registration form state
   const [showForm, setShowForm] = useState(false);
   const [registerDone, setRegisterDone] = useState(false);
+  const [registerSaving, setRegisterSaving] = useState(false);
+  const [registerError, setRegisterError] = useState("");
   const [regForm, setRegForm] = useState({ nama: "", nim: "", prodi: "", status: "" as MemberCategory | "" });
   const [regErrors, setRegErrors] = useState<Record<string, string>>({});
 
@@ -68,11 +74,12 @@ export default function Home() {
   useEffect(() => {
     setShowForm(false);
     setRegisterDone(false);
+    setRegisterError("");
     setRegForm({ nama: "", nim: "", prodi: "", status: "" });
     setRegErrors({});
   }, [rfidUid]);
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const errs: Record<string, string> = {};
     if (!regForm.nama.trim()) errs.nama = "Nama wajib diisi";
@@ -82,16 +89,24 @@ export default function Home() {
     setRegErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
-    addMember({
-      nim: regForm.nim,
-      nama: regForm.nama,
-      prodi: regForm.prodi,
-      email: `${regForm.nim}@student.itk.ac.id`,
-      noHp: "-",
-      rfidTag: rfidUid || "-",
-      status: regForm.status as MemberCategory,
-    });
-    setRegisterDone(true);
+    setRegisterSaving(true);
+    setRegisterError("");
+    try {
+      await addMember({
+        nim: regForm.nim,
+        nama: regForm.nama,
+        prodi: regForm.prodi,
+        email: `${regForm.nim}@student.itk.ac.id`,
+        noHp: "-",
+        rfidTag: rfidUid || "-",
+        status: regForm.status as MemberCategory,
+      });
+      setRegisterDone(true);
+    } catch (error) {
+      setRegisterError(error instanceof Error ? error.message : "Gagal menyimpan data anggota.");
+    } finally {
+      setRegisterSaving(false);
+    }
   };
 
 
@@ -104,20 +119,34 @@ export default function Home() {
       console.warn("Welcome speech is not supported by this browser.");
       return;
     }
+    lastSpokenScanVersion.current = rfidScanVersion;
     setNotificationSoundEnabled(true);
+  };
+
+  const handleSignOut = async () => {
+    if (!supabase) return;
+    const { error } = await supabase.auth.signOut();
+    if (error) setSignOutError(error.message);
   };
 
   useEffect(() => {
     if (!rfidUid || rfidScanVersion === lastProcessedScanVersion.current) return;
     lastProcessedScanVersion.current = rfidScanVersion;
-    if (notificationSoundEnabled) speakWelcomeMessage();
     const showWelcome = window.setTimeout(() => setWelcomeVisible(true), 0);
     const hideWelcome = window.setTimeout(() => setWelcomeVisible(false), 7000);
     return () => {
       window.clearTimeout(showWelcome);
       window.clearTimeout(hideWelcome);
     };
-  }, [notificationSoundEnabled, rfidScanVersion, rfidUid, scannedMember]);
+  }, [rfidScanVersion, rfidUid]);
+
+  useEffect(() => {
+    if (!notificationSoundEnabled || !membersLoaded || !rfidUid || rfidScanVersion === lastSpokenScanVersion.current) return;
+    lastSpokenScanVersion.current = rfidScanVersion;
+    speakMessage(scannedMember
+      ? `Selamat datang, ${scannedMember.nama}, di perpustakaan.`
+      : "Maaf, Anda belum terdaftar. Silakan mendaftar.");
+  }, [membersLoaded, notificationSoundEnabled, rfidScanVersion, rfidUid, scannedMember]);
 
   return (
     <div
@@ -225,11 +254,26 @@ export default function Home() {
             {notificationSoundEnabled ? "Suara sambutan aktif" : "Aktifkan suara"}
           </button>
           <div className="home-header-divider" style={{ width: 1, height: 20, background: "#e2e8f0" }} />
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700, color: "#0f2346", cursor: "pointer" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 700, color: "#0f2346" }}>
             <UserRound size={17} />
-            <span className="home-visitor-label">Pengunjung</span>
+            <span className="home-visitor-label">Staf Perpustakaan</span>
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              aria-label="Keluar dari akun staf"
+              title="Keluar"
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, border: "1px solid #cbd5e1", borderRadius: 999, padding: "6px 10px", background: "white", color: "#334155", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+            >
+              <LogOut size={14} />
+              Keluar
+            </button>
           </div>
         </div>
+        {signOutError && (
+          <p role="alert" style={{ position: "absolute", right: 24, top: 62, zIndex: 30, margin: 0, padding: "8px 12px", borderRadius: 8, background: "#fff1f2", color: "#be123c", fontSize: 12 }}>
+            Gagal keluar: {signOutError}
+          </p>
+        )}
       </header>
 
       {/* â”€â”€ MAIN CONTENT â”€â”€ */}
@@ -436,8 +480,9 @@ export default function Home() {
                     </div>
                     {regErrors.status && <p style={{ margin: "4px 0 0", fontSize: 13, color: "#dc2626" }}>{regErrors.status}</p>}
                   </div>
-                  <button type="submit" style={{ marginTop: 4, minHeight: 44, padding: "11px 12px", borderRadius: 10, border: "none", background: "linear-gradient(135deg, #1562e8, #0f2346)", color: "white", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 12px rgba(21,98,232,0.3)" }}>
-                    Daftarkan Anggota
+                  {registerError && <p role="alert" style={{ margin: 0, color: "#dc2626", fontSize: 13 }}>{registerError}</p>}
+                  <button type="submit" disabled={registerSaving} style={{ marginTop: 4, minHeight: 44, padding: "11px 12px", borderRadius: 10, border: "none", background: "linear-gradient(135deg, #1562e8, #0f2346)", color: "white", fontSize: 15, fontWeight: 700, cursor: registerSaving ? "wait" : "pointer", opacity: registerSaving ? 0.7 : 1, boxShadow: "0 4px 12px rgba(21,98,232,0.3)" }}>
+                    {registerSaving ? "Menyimpan..." : "Daftarkan Anggota"}
                   </button>
                 </form>
               )

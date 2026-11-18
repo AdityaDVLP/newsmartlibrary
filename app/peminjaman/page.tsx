@@ -285,11 +285,9 @@ export default function PeminjamanPage() {
 
     setBusy(true);
     try {
-      const storage = await borrowBook(memberId, bookId, bookTagId, dueAt);
+      await borrowBook(memberId, bookId, bookTagId, dueAt);
       const selectedBook = books.find((book) => book.id === bookId);
-      setNotice(storage === "local"
-        ? `Peminjaman ${selectedBook?.judul ?? "buku"} tersimpan di browser ini untuk uji coba. Belum terkirim ke database.`
-        : `Peminjaman ${selectedBook?.judul ?? "buku"} berhasil dicatat.`);
+      setNotice(`Peminjaman ${selectedBook?.judul ?? "buku"} berhasil dicatat.`);
       setBookId("");
       setBookTagId("");
       setBookQuery("");
@@ -305,10 +303,8 @@ export default function PeminjamanPage() {
     setNotice("");
     setBusy(true);
     try {
-      const storage = await returnBook(loanId);
-      setNotice(storage === "local"
-        ? "Pengembalian tersimpan di browser ini untuk uji coba. Stok lokal sudah diperbarui, tetapi belum tersinkron ke database."
-        : "Pengembalian berhasil dicatat dan stok buku telah diperbarui.");
+      await returnBook(loanId);
+      setNotice("Pengembalian berhasil dicatat dan stok buku telah diperbarui.");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Pengembalian gagal diproses.");
     } finally {

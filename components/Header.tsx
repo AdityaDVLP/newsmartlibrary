@@ -1,16 +1,18 @@
 "use client";
 
 import React, { useState } from "react";
-import { Menu, User, Radio, Play, Pause, ChevronDown, Bell } from "lucide-react";
+import { Menu, User, Radio, Pause, ChevronDown, LogOut } from "lucide-react";
 import { useLibrary } from "../context/LibraryContext";
 
 interface HeaderProps {
   sidebarOpen: boolean;
   setSidebarOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  userEmail: string;
+  onSignOut: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ sidebarOpen, setSidebarOpen }) => {
-  const { rfidActive, toggleRfid, connectionStatus, simulateVisitorScan, simulateBookScan } = useLibrary();
+export const Header: React.FC<HeaderProps> = ({ sidebarOpen, setSidebarOpen, userEmail, onSignOut }) => {
+  const { rfidActive, toggleRfid, simulateVisitorScan, simulateBookScan } = useLibrary();
   const [showSimMenu, setShowSimMenu] = useState(false);
 
   return (
@@ -123,16 +125,25 @@ export const Header: React.FC<HeaderProps> = ({ sidebarOpen, setSidebarOpen }) =
           {/* User Profile */}
           <div className="flex items-center space-x-3 border-l border-slate-200 pl-4">
             <div className="hidden text-right md:block">
-              <div className="text-xs font-bold text-slate-800 leading-tight">
-                ADMIN PERPUSTAKAAN
+              <div className="max-w-48 truncate text-xs font-bold text-slate-800 leading-tight">
+                {userEmail || "STAF PERPUSTAKAAN"}
               </div>
               <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
-                ADMIN
+                STAF
               </div>
             </div>
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-600 text-white shadow-xs">
               <User className="h-5 w-5" />
             </div>
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+              title="Keluar"
+              aria-label="Keluar dari akun staf"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
           </div>
         </div>
       </header>

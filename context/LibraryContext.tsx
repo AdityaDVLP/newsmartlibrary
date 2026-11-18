@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { getRfidStatus, getRfidUid } from "../lib/rfid";
 import { supabase } from "../lib/supabase";
 
@@ -120,11 +120,6 @@ export interface RssiPoint {
   label: string;
 }
 
-const LOCAL_MEMBERS_KEY = "itk_smartlib_test_members_v1";
-const LOCAL_BOOKS_KEY = "itk_smartlib_test_books_v1";
-const LOCAL_LOANS_KEY = "itk_smartlib_test_loans_v1";
-const LOCAL_VISITOR_LOGS_KEY = "itk_smartlib_test_visitor_logs_v1";
-
 const normalizeRfid = (value: string) => value.replace(/[^a-z0-9]/gi, "").toUpperCase();
 
 const mergeVisitorLogs = (...logGroups: VisitorLog[][]) => {
@@ -135,78 +130,16 @@ const mergeVisitorLogs = (...logGroups: VisitorLog[][]) => {
   return Array.from(logsById.values());
 };
 
-const readLocalMembers = (): Member[] => {
-  try {
-    const stored = window.localStorage.getItem(LOCAL_MEMBERS_KEY);
-    const parsed: unknown = stored ? JSON.parse(stored) : [];
-    return Array.isArray(parsed) ? parsed as Member[] : [];
-  } catch {
-    return [];
-  }
-};
-
-const writeLocalMember = (member: Member) => {
-  writeLocalMembers([member, ...readLocalMembers().filter((savedMember) => savedMember.id !== member.id)]);
-};
-
-const writeLocalMembers = (members: Member[]) => {
-  window.localStorage.setItem(LOCAL_MEMBERS_KEY, JSON.stringify(members));
-};
-
-const readLocalBooks = (): Book[] => {
-  try {
-    const stored = window.localStorage.getItem(LOCAL_BOOKS_KEY);
-    const parsed: unknown = stored ? JSON.parse(stored) : [];
-    return Array.isArray(parsed) ? parsed as Book[] : [];
-  } catch {
-    return [];
-  }
-};
-
-const writeLocalBook = (book: Book) => {
-  writeLocalBooks([book, ...readLocalBooks().filter((savedBook) => savedBook.id !== book.id)]);
-};
-
-const writeLocalBooks = (books: Book[]) => {
-  window.localStorage.setItem(LOCAL_BOOKS_KEY, JSON.stringify(books));
-};
-
-const readLocalLoans = (): Loan[] => {
-  try {
-    const stored = window.localStorage.getItem(LOCAL_LOANS_KEY);
-    const parsed: unknown = stored ? JSON.parse(stored) : [];
-    return Array.isArray(parsed) ? parsed as Loan[] : [];
-  } catch {
-    return [];
-  }
-};
-
-const writeLocalLoans = (loans: Loan[]) => {
-  window.localStorage.setItem(LOCAL_LOANS_KEY, JSON.stringify(loans));
-};
-
-const readLocalVisitorLogs = (): VisitorLog[] => {
-  try {
-    const stored = window.localStorage.getItem(LOCAL_VISITOR_LOGS_KEY);
-    const parsed: unknown = stored ? JSON.parse(stored) : [];
-    return Array.isArray(parsed) ? parsed as VisitorLog[] : [];
-  } catch {
-    return [];
-  }
-};
-
-const writeLocalVisitorLogs = (logs: VisitorLog[]) => {
-  window.localStorage.setItem(LOCAL_VISITOR_LOGS_KEY, JSON.stringify(logs));
-};
-
 interface LibraryContextType {
   visitorLogs: VisitorLog[];
   bookLogs: BookLog[];
   members: Member[];
+  membersLoaded: boolean;
   books: Book[];
   loans: Loan[];
   activities: Activity[];
   rssiHistory: RssiPoint[];
+  databaseError: string | null;
   rfidActive: boolean;
   rfidUid: string | null;
   rfidScanVersion: number;
@@ -214,14 +147,14 @@ interface LibraryContextType {
   connectionStatus: "Connected" | "Connecting..." | "Disconnected";
   toggleRfid: () => void;
   setTxPower: (power: number) => void;
-  addMember: (member: Omit<Member, "id" | "dateRegistered">) => Promise<"database" | "local">;
+  addMember: (member: Omit<Member, "id" | "dateRegistered">) => Promise<void>;
   updateMember: (id: string, updatedData: Partial<Member>) => Promise<void>;
   deleteMember: (id: string) => Promise<void>;
-  addBook: (book: Omit<Book, "id">) => Promise<"database" | "local">;
-  updateBook: (id: string, updatedData: Partial<Book>) => Promise<"database" | "local">;
+  addBook: (book: Omit<Book, "id">) => Promise<void>;
+  updateBook: (id: string, updatedData: Partial<Book>) => Promise<void>;
   deleteBook: (id: string) => Promise<void>;
-  borrowBook: (memberId: string, bookId: string, bookTagId: string, dueAt: string) => Promise<"database" | "local">;
-  returnBook: (loanId: string) => Promise<"database" | "local">;
+  borrowBook: (memberId: string, bookId: string, bookTagId: string, dueAt: string) => Promise<void>;
+  returnBook: (loanId: string) => Promise<void>;
 
   simulateVisitorScan: () => void;
   simulateBookScan: () => void;
@@ -237,6 +170,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [visitorLogs, setVisitorLogs] = useState<VisitorLog[]>([]);
   const [bookLogs, setBookLogs] = useState<BookLog[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [databaseError, setDatabaseError] = useState<string | null>(null);
+  const [rssiHistory, setRssiHistory] = useState<RssiPoint[]>([]);
 
   const [rfidActive, setRfidActive] = useState<boolean>(true);
   const [rfidUid, setRfidUid] = useState<string | null>(null);
@@ -244,6 +179,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [pendingVisitorScans, setPendingVisitorScans] = useState<{ id: string; uid: string; scannedAt: string }[]>([]);
   const [txPower, setTxPower] = useState<number>(20);
   const [connectionStatus, setConnectionStatus] = useState<"Connected" | "Connecting..." | "Disconnected">("Connected");
+
+  const requireSupabase = () => {
+    if (!supabase) {
+      throw new Error("Supabase belum dikonfigurasi. Periksa URL dan publishable key di file .env.");
+    }
+    return supabase;
+  };
 
   const mapMemberFromDb = (row: Record<string, unknown>): Member => ({
     id: String(row.id ?? ""),
@@ -377,16 +319,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   });
 
   const loadSupabaseData = async () => {
-    const localMembers = readLocalMembers();
-    const localBooks = readLocalBooks();
-    const localLoans = readLocalLoans();
-    const localVisitorLogs = readLocalVisitorLogs();
-    setMembers(localMembers);
-    setBooks(localBooks);
-    setLoans(localLoans);
-    setVisitorLogs(localVisitorLogs);
-    if (localMembers.length > 0) setMembersLoaded(true);
     if (!supabase) {
+      setDatabaseError("Supabase belum dikonfigurasi. Periksa URL dan publishable key.");
       setMembersLoaded(true);
       return;
     }
@@ -402,58 +336,44 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         supabase.from("book_loans").select("*").order("borrowed_at", { ascending: false }),
       ]);
 
-      if (!membersResponse.error) {
-        const remoteMembers = (membersResponse.data ?? []).map((row) => mapMemberFromDb(row as Record<string, unknown>));
-        const localMembers = readLocalMembers();
-        const localIds = new Set(localMembers.map((member) => member.id));
-        setMembers([...localMembers, ...remoteMembers.filter((member) => !localIds.has(member.id))]);
-      } else {
-        setMembers(readLocalMembers());
+      const responses = [
+        ["anggota", membersResponse],
+        ["buku", booksResponse],
+        ["log pengunjung", visitorLogsResponse],
+        ["log buku", bookLogsResponse],
+        ["aktivitas", activitiesResponse],
+        ["riwayat RSSI", rssiResponse],
+        ["peminjaman", loansResponse],
+      ] as const;
+      const failedResponse = responses.find(([, response]) => response.error !== null);
+      if (failedResponse) {
+        const responseError = failedResponse[1].error;
+        throw new Error(`Gagal memuat ${failedResponse[0]}: ${responseError?.message ?? "Kesalahan database."}`);
       }
 
-      if (!booksResponse.error) {
-        const remoteBooks = (booksResponse.data ?? []).map((row) => mapBookFromDb(row as Record<string, unknown>));
-        const localIds = new Set(localBooks.map((book) => book.id));
-        setBooks([...localBooks, ...remoteBooks.filter((book) => !localIds.has(book.id))]);
-      } else {
-        setBooks(readLocalBooks());
-      }
-
-      if (!visitorLogsResponse.error) {
-        const remoteVisitorLogs = (visitorLogsResponse.data ?? []).map((row) => mapVisitorLogFromDb(row as Record<string, unknown>));
-        setVisitorLogs((current) => mergeVisitorLogs(current, localVisitorLogs, remoteVisitorLogs).slice(0, 100));
-      }
-
-      if (!bookLogsResponse.error) {
-        setBookLogs((bookLogsResponse.data ?? []).map((row) => mapBookLogFromDb(row as Record<string, unknown>)));
-      }
-
-      if (!activitiesResponse.error) {
-        setActivities((activitiesResponse.data ?? []).map((row) => mapActivityFromDb(row as Record<string, unknown>)));
-      }
-
-      if (!rssiResponse.error) {
-        setRssiHistory((rssiResponse.data ?? []).map((row) => ({
-          id: Number(row.id),
-          time: String(row.time ?? ""),
-          rssi: Number(row.rssi ?? 0),
-          label: String(row.label ?? ""),
-        })));
-      }
-
-      if (!loansResponse.error) {
-        const remoteLoans = (loansResponse.data ?? []).map((row) => mapLoanFromDb(row as Record<string, unknown>));
-        const localIds = new Set(localLoans.map((loan) => loan.id));
-        setLoans([...localLoans, ...remoteLoans.filter((loan) => !localIds.has(loan.id))]);
-      } else {
-        setLoans(readLocalLoans());
-      }
+      setMembers((membersResponse.data ?? []).map((row) => mapMemberFromDb(row as Record<string, unknown>)));
+      setBooks((booksResponse.data ?? []).map((row) => mapBookFromDb(row as Record<string, unknown>)));
+      setVisitorLogs((visitorLogsResponse.data ?? []).map((row) => mapVisitorLogFromDb(row as Record<string, unknown>)).slice(0, 100));
+      setBookLogs((bookLogsResponse.data ?? []).map((row) => mapBookLogFromDb(row as Record<string, unknown>)));
+      setActivities((activitiesResponse.data ?? []).map((row) => mapActivityFromDb(row as Record<string, unknown>)));
+      setRssiHistory((rssiResponse.data ?? []).map((row) => ({
+        id: Number(row.id),
+        time: String(row.time ?? ""),
+        rssi: Number(row.rssi ?? 0),
+        label: String(row.label ?? ""),
+      })));
+      setLoans((loansResponse.data ?? []).map((row) => mapLoanFromDb(row as Record<string, unknown>)));
+      setDatabaseError(null);
       setMembersLoaded(true);
     } catch (error) {
-      setMembers(readLocalMembers());
-      setBooks(readLocalBooks());
-      setLoans(readLocalLoans());
-      setVisitorLogs((current) => mergeVisitorLogs(current, readLocalVisitorLogs()).slice(0, 100));
+      setMembers([]);
+      setBooks([]);
+      setLoans([]);
+      setVisitorLogs([]);
+      setBookLogs([]);
+      setActivities([]);
+      setRssiHistory([]);
+      setDatabaseError(error instanceof Error ? error.message : String(error));
       setMembersLoaded(true);
       console.warn("Failed to load Supabase library data:", error);
     }
@@ -464,6 +384,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const { error } = await client.from("members").upsert(mapMemberToDb(member), { onConflict: "id" });
     if (error) throw error;
+    setDatabaseError(null);
   };
 
   const persistBookToSupabase = async (book: Book) => {
@@ -471,6 +392,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const { error } = await client.from("books").upsert(mapBookToDb(book), { onConflict: "id" });
     if (error) throw error;
+    setDatabaseError(null);
   };
 
   const persistVisitorLogToSupabase = async (log: VisitorLog) => {
@@ -478,26 +400,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const { error } = await client.from("visitor_logs").upsert(mapVisitorLogToDb(log), { onConflict: "id" });
     if (error) throw error;
+    setDatabaseError(null);
   };
 
-  const storeVisitorLog = async (log: VisitorLog) => {
-    try {
-      await persistVisitorLogToSupabase(log);
-    } catch (error) {
-      try {
-        writeLocalVisitorLogs(mergeVisitorLogs([log], readLocalVisitorLogs()).slice(0, 100));
-      } catch (storageError) {
-        console.warn("Visitor log could not be saved locally:", storageError);
-      }
-      console.warn("Supabase unavailable; visitor log saved in browser storage.", error);
-    }
-  };
+  const storeVisitorLog = (log: VisitorLog) => persistVisitorLogToSupabase(log);
 
   const persistBookLogToSupabase = async (log: BookLog) => {
     const client = requireSupabase();
 
     const { error } = await client.from("book_logs").upsert(mapBookLogToDb(log), { onConflict: "id" });
     if (error) throw error;
+    setDatabaseError(null);
   };
 
   const persistActivityToSupabase = async (activity: Activity) => {
@@ -505,14 +418,19 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const { error } = await client.from("activities").upsert(mapActivityToDb(activity), { onConflict: "id" });
     if (error) throw error;
+    setDatabaseError(null);
   };
+
+  const reportBackgroundDatabaseError = useCallback((operation: string, error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    setDatabaseError(`${operation}: ${message}`);
+    console.error(`${operation}:`, error);
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadSupabaseData(), 0);
     return () => window.clearTimeout(timer);
   }, []);
-
-  const [rssiHistory, setRssiHistory] = useState<RssiPoint[]>([]);
 
   useEffect(() => {
     if (!rfidActive) return;
@@ -583,8 +501,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           tipe: "visitor",
           iconType: "user",
         };
-        void storeVisitorLog(log);
-        void persistActivityToSupabase(activity).catch((error) => console.warn(error));
+        void storeVisitorLog(log).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan log pengunjung", error));
+        void persistActivityToSupabase(activity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
         return [{ log, activity }];
       });
 
@@ -598,18 +516,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
-  }, [members, membersLoaded, pendingVisitorScans]);
+  }, [members, membersLoaded, pendingVisitorScans, reportBackgroundDatabaseError]);
 
   const toggleRfid = () => {
     setRfidActive((prev) => !prev);
-    setConnectionStatus((prev) => (rfidActive ? "Connecting..." : "Connected"));
-  };
-
-  const requireSupabase = () => {
-    if (!supabase) {
-      throw new Error("Supabase belum dikonfigurasi. Periksa URL dan anon key di file .env.");
-    }
-    return supabase;
+    setConnectionStatus(rfidActive ? "Connecting..." : "Connected");
   };
 
   const addMember = async (memberData: Omit<Member, "id" | "dateRegistered">) => {
@@ -618,74 +529,42 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       id: `M_${globalThis.crypto.randomUUID()}`,
       dateRegistered: new Date().toISOString().split("T")[0],
     };
-    let storage: "database" | "local" = "database";
-    try {
-      await persistMemberToSupabase(newMember);
-    } catch (error) {
-      try {
-        writeLocalMember(newMember);
-        storage = "local";
-        console.warn("Supabase unavailable; member saved in browser storage.", error);
-      } catch (storageError) {
-        throw new Error(`Database dan penyimpanan lokal gagal: ${String(storageError)}`);
-      }
-    }
+    await persistMemberToSupabase(newMember);
     setMembers((prev) => [newMember, ...prev]);
 
     const newActivity: Activity = {
-      id: `ACT_${Date.now()}`,
+      id: `ACT_${globalThis.crypto.randomUUID()}`,
       waktu: new Date().toTimeString().substring(0, 5),
       deskripsi: `Anggota baru terdaftar: ${newMember.nama} (${newMember.nim})`,
       tipe: "member",
       iconType: "user",
     };
     setActivities((prev) => [newActivity, ...prev]);
-    if (storage === "database") {
-      void persistActivityToSupabase(newActivity).catch((error) => console.warn(error));
-    }
-    return storage;
+    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
   };
 
   const updateMember = async (id: string, updatedData: Partial<Member>) => {
     const currentMember = members.find((member) => member.id === id);
     if (!currentMember) throw new Error("Data anggota tidak ditemukan.");
     const updatedMember = { ...currentMember, ...updatedData };
-    let storedLocally = readLocalMembers().some((member) => member.id === id);
-    if (storedLocally) {
-      writeLocalMember(updatedMember);
-    } else {
-      try {
-        await persistMemberToSupabase(updatedMember);
-      } catch (error) {
-        writeLocalMember(updatedMember);
-        storedLocally = true;
-        console.warn("Supabase unavailable; member changes saved in browser storage.", error);
-      }
-    }
+    await persistMemberToSupabase(updatedMember);
     setMembers((prev) => prev.map((member) => member.id === id ? updatedMember : member));
     const newActivity: Activity = {
-      id: `ACT_${Date.now()}`,
+      id: `ACT_${globalThis.crypto.randomUUID()}`,
       waktu: new Date().toTimeString().substring(0, 5),
       deskripsi: `Data anggota diperbarui: ID ${id}`,
       tipe: "member",
       iconType: "user",
     };
     setActivities((prev) => [newActivity, ...prev]);
-    if (!storedLocally) {
-      void persistActivityToSupabase(newActivity).catch((error) => console.warn(error));
-    }
+    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
   };
 
   const deleteMember = async (id: string) => {
-    const localMembers = readLocalMembers();
-    if (localMembers.some((member) => member.id === id)) {
-      writeLocalMembers(localMembers.filter((member) => member.id !== id));
-      setMembers((prev) => prev.filter((member) => member.id !== id));
-      return;
-    }
     const client = requireSupabase();
     const { error } = await client.from("members").delete().eq("id", id);
     if (error) throw error;
+    setDatabaseError(null);
     setMembers((prev) => prev.filter((member) => member.id !== id));
   };
 
@@ -694,50 +573,25 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ...bookData,
       id: `B_${globalThis.crypto.randomUUID()}`,
     };
-    let storage: "database" | "local" = "database";
-    try {
-      await persistBookToSupabase(newBook);
-    } catch (error) {
-      try {
-        writeLocalBook(newBook);
-        storage = "local";
-        console.warn("Supabase unavailable; book saved in browser storage.", error);
-      } catch (storageError) {
-        throw new Error(`Database dan penyimpanan lokal gagal: ${String(storageError)}`);
-      }
-    }
+    await persistBookToSupabase(newBook);
     setBooks((prev) => [newBook, ...prev]);
 
     const newActivity: Activity = {
-      id: `ACT_${Date.now()}`,
+      id: `ACT_${globalThis.crypto.randomUUID()}`,
       waktu: new Date().toTimeString().substring(0, 5),
       deskripsi: `Buku baru didaftarkan: ${newBook.judul} [${newBook.lokasiRak}]`,
       tipe: "book",
       iconType: "book",
     };
     setActivities((prev) => [newActivity, ...prev]);
-    if (storage === "database") {
-      void persistActivityToSupabase(newActivity).catch((error) => console.warn(error));
-    }
-    return storage;
+    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
   };
 
   const updateBook = async (id: string, updatedData: Partial<Book>) => {
     const currentBook = books.find((book) => book.id === id);
     if (!currentBook) throw new Error("Data buku tidak ditemukan.");
     const updatedBook = { ...currentBook, ...updatedData };
-    let storage: "database" | "local" = readLocalBooks().some((book) => book.id === id) ? "local" : "database";
-    if (storage === "local") {
-      writeLocalBook(updatedBook);
-    } else {
-      try {
-        await persistBookToSupabase(updatedBook);
-      } catch (error) {
-        writeLocalBook(updatedBook);
-        storage = "local";
-        console.warn("Supabase unavailable; book changes saved in browser storage.", error);
-      }
-    }
+    await persistBookToSupabase(updatedBook);
     setBooks((prev) => prev.map((book) => book.id === id ? updatedBook : book));
     const newActivity: Activity = {
       id: `ACT_${Date.now()}`,
@@ -747,26 +601,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       iconType: "book",
     };
     setActivities((prev) => [newActivity, ...prev]);
-    if (storage === "database") {
-      void persistActivityToSupabase(newActivity).catch((error) => console.warn(error));
-    }
-    return storage;
+    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
   };
 
   const deleteBook = async (id: string) => {
-    const localBooks = readLocalBooks();
-    if (localBooks.some((book) => book.id === id)) {
-      writeLocalBooks(localBooks.filter((book) => book.id !== id));
-      setBooks((prev) => prev.filter((book) => book.id !== id));
-      return;
-    }
     const client = requireSupabase();
     const { error } = await client.from("books").delete().eq("id", id);
     if (error) throw error;
+    setDatabaseError(null);
     setBooks((prev) => prev.filter((book) => book.id !== id));
   };
 
-  const borrowBook = async (memberId: string, bookId: string, bookTagId: string, dueAt: string): Promise<"database" | "local"> => {
+  const borrowBook = async (memberId: string, bookId: string, bookTagId: string, dueAt: string) => {
     const member = members.find((item) => item.id === memberId);
     const book = books.find((item) => item.id === bookId);
     if (!member) throw new Error("Anggota tidak ditemukan.");
@@ -777,27 +623,25 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!normalizedBookTagId || !bookHasTag) {
       throw new Error("ID tag EPC tidak terdaftar pada buku yang dipilih.");
     }
-    const activeLoanForMember = [...loans, ...readLocalLoans()].find(
+    const activeLoanForMember = loans.find(
       (item) => item.memberId === memberId && item.status === "Dipinjam"
     );
     if (activeLoanForMember) {
       throw new Error(`Anggota masih meminjam "${activeLoanForMember.bookTitle}". Kembalikan buku tersebut sebelum meminjam judul lain.`);
     }
-    const legacyActiveLoanForBook = [...loans, ...readLocalLoans()].find(
+    const legacyActiveLoanForBook = loans.find(
       (item) => item.bookId === bookId && item.status === "Dipinjam" && !item.bookTagId
     );
     if (legacyActiveLoanForBook) {
       throw new Error("Transaksi aktif lama belum memiliki ID tag EPC; selesaikan pengembaliannya sebelum meminjam eksemplar lain.");
     }
-    const activeLoanForTag = [...loans, ...readLocalLoans()].find(
+    const activeLoanForTag = loans.find(
       (item) => item.status === "Dipinjam" && normalizeRfid(item.bookTagId ?? "") === normalizedBookTagId
     );
     if (activeLoanForTag) throw new Error("ID tag EPC ini sudah tercatat pada pinjaman aktif.");
 
     const now = new Date();
     const borrowedAt = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    const lastAllowedDueDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7);
-    const lastAllowedDue = `${lastAllowedDueDate.getFullYear()}-${String(lastAllowedDueDate.getMonth() + 1).padStart(2, "0")}-${String(lastAllowedDueDate.getDate()).padStart(2, "0")}`;
     const loanId = `L_${globalThis.crypto.randomUUID()}`;
     const loan: Loan = {
       id: loanId,
@@ -814,75 +658,37 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       status: "Dipinjam",
     };
 
-    try {
-      const client = requireSupabase();
-      const { error } = await client.rpc("borrow_book", {
-        p_loan_id: loanId,
-        p_member_id: memberId,
-        p_book_id: bookId,
-        p_book_tag_id: bookTagId,
-        p_due_at: dueAt,
-      });
-      if (error) throw error;
-
-      const updatedBook: Book = {
-        ...book,
-        stok: book.stok - 1,
-        status: book.stok - 1 === 0 ? "Dipinjam" : "Tersedia",
-      };
-      setLoans((prev) => [loan, ...prev]);
-      setBooks((prev) => prev.map((item) => item.id === bookId ? updatedBook : item));
-      return "database";
-    } catch (databaseError) {
-      const databaseMessage = typeof databaseError === "object" && databaseError !== null && "message" in databaseError
-        ? String(databaseError.message)
-        : "";
-      if (databaseMessage.includes("Anggota masih memiliki pinjaman aktif")) {
+    const client = requireSupabase();
+    const { error } = await client.rpc("borrow_book", {
+      p_loan_id: loanId,
+      p_member_id: memberId,
+      p_book_id: bookId,
+      p_book_tag_id: bookTagId,
+      p_due_at: dueAt,
+    });
+    if (error) {
+      if (error.message.includes("book_loans_one_active_member_uidx") ||
+          error.message.includes("Anggota masih memiliki pinjaman aktif")) {
         throw new Error("Anggota masih memiliki pinjaman aktif. Kembalikan buku tersebut sebelum meminjam judul lain.");
       }
-      if (databaseMessage.includes("ID tag EPC ini sudah tercatat pada pinjaman aktif")) {
+      if (error.message.includes("book_loans_active_tag_uidx") ||
+          error.message.includes("ID tag EPC ini sudah tercatat pada pinjaman aktif")) {
         throw new Error("ID tag EPC ini sudah tercatat pada pinjaman aktif.");
       }
-      if (databaseMessage.includes("book_loans_active_tag_uidx")) {
-        throw new Error("ID tag EPC ini sudah tercatat pada pinjaman aktif.");
-      }
-
-      const activeLoans = loans.filter((item) => item.memberId === memberId && item.status === "Dipinjam");
-      if (activeLoans.length >= 1) {
-        const activeLoan = activeLoans[0];
-        throw new Error(`Anggota masih meminjam "${activeLoan.bookTitle}". Kembalikan buku tersebut sebelum meminjam judul lain.`);
-      }
-      if (activeLoans.some((item) => item.dueAt < borrowedAt)) {
-        throw new Error("Anggota memiliki pinjaman yang sudah terlambat.");
-      }
-      if (dueAt <= borrowedAt || dueAt > lastAllowedDue) {
-        throw new Error("Tanggal jatuh tempo harus antara 1 dan 7 hari ke depan.");
-      }
-      if (book.status === "Dalam Perawatan") throw new Error("Buku sedang dalam perawatan.");
-      if (book.stok < 1) throw new Error("Stok buku tidak tersedia.");
-
-      const updatedBook: Book = {
-        ...book,
-        stok: book.stok - 1,
-        status: book.stok - 1 === 0 ? "Dipinjam" : "Tersedia",
-      };
-      const localLoans = readLocalLoans();
-      try {
-        writeLocalLoans([loan, ...localLoans.filter((item) => item.id !== loanId)]);
-        writeLocalBook(updatedBook);
-      } catch (storageError) {
-        writeLocalLoans(localLoans);
-        throw new Error(`Peminjaman gagal disimpan lokal: ${String(storageError)}`);
-      }
-
-      setLoans((prev) => [loan, ...prev]);
-      setBooks((prev) => prev.map((item) => item.id === bookId ? updatedBook : item));
-      console.warn("Supabase unavailable; loan saved in browser storage.", databaseError);
-      return "local";
+      throw new Error(error.message || "Peminjaman gagal diproses.");
     }
+
+    setDatabaseError(null);
+    const updatedBook: Book = {
+      ...book,
+      stok: book.stok - 1,
+      status: book.stok - 1 === 0 ? "Dipinjam" : "Tersedia",
+    };
+    setLoans((prev) => [loan, ...prev]);
+    setBooks((prev) => prev.map((item) => item.id === bookId ? updatedBook : item));
   };
 
-  const returnBook = async (loanId: string): Promise<"database" | "local"> => {
+  const returnBook = async (loanId: string) => {
     const loan = loans.find((item) => item.id === loanId);
     if (!loan || loan.status !== "Dipinjam") {
       throw new Error("Transaksi aktif tidak ditemukan atau buku sudah dikembalikan.");
@@ -894,39 +700,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const returnedAt = `${todayDate.getFullYear()}-${String(todayDate.getMonth() + 1).padStart(2, "0")}-${String(todayDate.getDate()).padStart(2, "0")}`;
     const returnedLoan: Loan = { ...loan, returnedAt, status: "Dikembalikan" };
 
-    try {
-      const client = requireSupabase();
-      const { error } = await client.rpc("return_book", { p_loan_id: loanId });
-      if (error) throw error;
+    const client = requireSupabase();
+    const { error } = await client.rpc("return_book", { p_loan_id: loanId });
+    if (error) throw new Error(error.message || "Pengembalian gagal diproses.");
 
-      const updatedBook: Book = {
-        ...book,
-        stok: book.stok + 1,
-        status: book.status === "Dalam Perawatan" ? book.status : "Tersedia",
-      };
-      setLoans((prev) => prev.map((item) => item.id === loanId ? returnedLoan : item));
-      setBooks((prev) => prev.map((item) => item.id === book.id ? updatedBook : item));
-      return "database";
-    } catch (databaseError) {
-      const updatedBook: Book = {
-        ...book,
-        stok: book.stok + 1,
-        status: book.status === "Dalam Perawatan" ? book.status : "Tersedia",
-      };
-      const localLoans = readLocalLoans();
-      try {
-        writeLocalLoans([returnedLoan, ...localLoans.filter((item) => item.id !== loanId)]);
-        writeLocalBook(updatedBook);
-      } catch (storageError) {
-        writeLocalLoans(localLoans);
-        throw new Error(`Pengembalian gagal disimpan lokal: ${String(storageError)}`);
-      }
-
-      setLoans((prev) => prev.map((item) => item.id === loanId ? returnedLoan : item));
-      setBooks((prev) => prev.map((item) => item.id === book.id ? updatedBook : item));
-      console.warn("Supabase unavailable; return saved in browser storage.", databaseError);
-      return "local";
-    }
+    setDatabaseError(null);
+    const updatedBook: Book = {
+      ...book,
+      stok: book.stok + 1,
+      status: book.status === "Dalam Perawatan" ? book.status : "Tersedia",
+    };
+    setLoans((prev) => prev.map((item) => item.id === loanId ? returnedLoan : item));
+    setBooks((prev) => prev.map((item) => item.id === book.id ? updatedBook : item));
   };
 
   const simulateVisitorScan = () => {
@@ -938,7 +723,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const status = statuses[Math.floor(Math.random() * statuses.length)];
 
     const newLog: VisitorLog = {
-      id: `V${Date.now().toString().slice(-4)}`,
+      id: `V_${globalThis.crypto.randomUUID()}`,
       waktu: timeStr,
       nama: randomMember.nama,
       nim: randomMember.nim,
@@ -950,17 +735,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
 
     setVisitorLogs((prev) => [newLog, ...prev].slice(0, 16));
-    void storeVisitorLog(newLog);
+    void storeVisitorLog(newLog).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan log pengunjung", error));
 
     const newAct: Activity = {
-      id: `ACT_${Date.now()}`,
+      id: `ACT_${globalThis.crypto.randomUUID()}`,
       waktu: timeStr.substring(0, 5),
       deskripsi: `${randomMember.nama} (${randomMember.nim}) tap ${status.toLowerCase()} perpustakaan`,
       tipe: "visitor",
       iconType: "user",
     };
     setActivities([newAct, ...activities.slice(0, 15)]);
-    void persistActivityToSupabase(newAct).catch((error) => console.warn(error));
+    void persistActivityToSupabase(newAct).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
   };
 
   const simulateBookScan = () => {
@@ -971,7 +756,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const simulatedRssi = Math.floor(Math.random() * 35) - 80; // -80 to -45
 
     const newLog: BookLog = {
-      id: `BL${Date.now().toString().slice(-4)}`,
+      id: `BL_${globalThis.crypto.randomUUID()}`,
       waktu: timeStr,
       isbn: randomBook.isbn,
       judul: randomBook.judul,
@@ -982,17 +767,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     setBookLogs([newLog, ...bookLogs.slice(0, 15)]);
-    void persistBookLogToSupabase(newLog).catch((error) => console.warn(error));
+    void persistBookLogToSupabase(newLog).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan log buku", error));
 
     const newAct: Activity = {
-      id: `ACT_${Date.now()}`,
+      id: `ACT_${globalThis.crypto.randomUUID()}`,
       waktu: timeStr.substring(0, 5),
       deskripsi: `Tag RFID Buku [${randomBook.judul.substring(0, 20)}...] terdeteksi di ${randomBook.lokasiRak} (${simulatedRssi} dBm)`,
       tipe: "book",
       iconType: "book",
     };
     setActivities([newAct, ...activities.slice(0, 15)]);
-    void persistActivityToSupabase(newAct).catch((error) => console.warn(error));
+    void persistActivityToSupabase(newAct).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
   };
 
   return (
@@ -1001,10 +786,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         visitorLogs,
         bookLogs,
         members,
+        membersLoaded,
         books,
         loans,
         activities,
         rssiHistory,
+        databaseError,
         rfidActive,
         rfidUid,
         rfidScanVersion,
@@ -1024,6 +811,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         simulateBookScan,
       }}
     >
+      {databaseError && (
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 z-[100] flex max-w-lg items-start gap-3 rounded-xl border border-rose-200 bg-white p-4 text-sm text-rose-800 shadow-lg"
+        >
+          <p className="flex-1">{databaseError}</p>
+          <button
+            type="button"
+            onClick={() => setDatabaseError(null)}
+            className="font-semibold text-rose-700 hover:text-rose-900"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
       {children}
     </LibraryContext.Provider>
   );

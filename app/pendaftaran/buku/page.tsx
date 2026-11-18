@@ -56,7 +56,6 @@ export default function PendaftaranBukuPage() {
   const [viewingBook, setViewingBook] = useState<Book | null>(null);
   const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [crudError, setCrudError] = useState("");
-  const [crudNotice, setCrudNotice] = useState("");
   const [saving, setSaving] = useState(false);
 
   // Export Modal State
@@ -95,7 +94,7 @@ export default function PendaftaranBukuPage() {
   };
 
   // Adjust stock directly in table (+1 or -1)
-  const handleAdjustStock = (book: Book, delta: number) => {
+  const handleAdjustStock = async (book: Book, delta: number) => {
     const currentEpcs = book.epcList && book.epcList.length > 0 ? [...book.epcList] : [book.rfidTag];
     const newStok = Math.max(0, book.stok + delta);
 
@@ -107,11 +106,16 @@ export default function PendaftaranBukuPage() {
       currentEpcs.pop();
     }
 
-    updateBook(book.id, {
-      stok: newStok,
-      epcList: currentEpcs,
-      status: newStok === 0 ? "Dipinjam" : "Tersedia",
-    });
+    setCrudError("");
+    try {
+      await updateBook(book.id, {
+        stok: newStok,
+        epcList: currentEpcs,
+        status: newStok === 0 ? "Dipinjam" : "Tersedia",
+      });
+    } catch (error) {
+      setCrudError(error instanceof Error ? error.message : "Gagal memperbarui stok buku.");
+    }
   };
 
   // Per-Eksemplar EPC Helpers
@@ -278,9 +282,8 @@ export default function PendaftaranBukuPage() {
 
     setSaving(true);
     setCrudError("");
-    setCrudNotice("");
     try {
-      const storage = await addBook({
+      await addBook({
         isbn,
         judul,
         pengarang: pengarang || "Anonim",
@@ -303,9 +306,6 @@ export default function PendaftaranBukuPage() {
       setLockedEpcs([false]);
       setEpcError(null);
       setShowAddModal(false);
-      if (storage === "local") {
-        setCrudNotice("Data buku tersimpan di browser ini untuk uji coba. Data belum terkirim ke database.");
-      }
     } catch (error) {
       setCrudError(error instanceof Error ? error.message : "Gagal menyimpan buku ke database.");
     } finally {
@@ -330,9 +330,8 @@ export default function PendaftaranBukuPage() {
 
     setSaving(true);
     setCrudError("");
-    setCrudNotice("");
     try {
-      const storage = await updateBook(editingBook.id, {
+      await updateBook(editingBook.id, {
         isbn: editingBook.isbn,
         judul: editingBook.judul,
         pengarang: editingBook.pengarang,
@@ -348,9 +347,6 @@ export default function PendaftaranBukuPage() {
       setEditingBook(null);
       setLockedEpcs([false]);
       setEpcError(null);
-      if (storage === "local") {
-        setCrudNotice("Perubahan buku tersimpan di browser ini untuk uji coba. Data belum tersinkron ke database.");
-      }
     } catch (error) {
       setCrudError(error instanceof Error ? error.message : "Gagal memperbarui data buku.");
     } finally {
@@ -425,12 +421,6 @@ export default function PendaftaranBukuPage() {
           {crudError}
         </div>
       )}
-      {crudNotice && (
-        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800">
-          {crudNotice}
-        </div>
-      )}
-
       {/* Main Content Card: Books Catalog Table */}
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
