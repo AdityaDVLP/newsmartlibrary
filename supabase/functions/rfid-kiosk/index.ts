@@ -21,7 +21,11 @@ const supabaseAdmin = supabaseUrl && serviceRoleKey
 function jsonResponse(body: Record<string, unknown>, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...corsHeaders,
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json",
+    },
   });
 }
 
@@ -113,18 +117,38 @@ Deno.serve(async (request: Request) => {
     }
 
     if (action === "verify_staff") {
-      const email = readText(body.email, 254)?.toLowerCase();
       const uid = normalizeRfid(readText(body.rfidTag, 64) ?? "");
-      if (!email || !email.includes("@") || !/^[A-F0-9]{4,32}$/.test(uid)) {
+      if (!/^[A-F0-9]{4,32}$/.test(uid)) {
         return jsonResponse({ verified: false });
       }
 
-      const { data, error } = await supabaseAdmin.rpc("verify_staff_rfid", {
-        p_email: email,
-        p_rfid_tag: uid,
+      const { data: badge, error: badgeError } = await supabaseAdmin
+        .from("staff_rfid_badges")
+        .select("user_id")
+        .eq("rfid_uid", uid)
+        .maybeSingle();
+      if (badgeError) throw badgeError;
+      if (!badge) return jsonResponse({ verified: false });
+
+      const { data: userData, error: userError } = await supabaseAdmin.auth.admin.getUserById(badge.user_id);
+      if (userError) throw userError;
+      const staffUser = userData.user;
+      if (
+        !staffUser?.email ||
+        staffUser.app_metadata?.library_role !== "staff"
+      ) {
+        return jsonResponse({ verified: false });
+      }
+
+      const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+        type: "magiclink",
+        email: staffUser.email,
       });
-      if (error) throw error;
-      return jsonResponse({ verified: data === true });
+      if (linkError) throw linkError;
+
+      const tokenHash = linkData.properties?.hashed_token;
+      if (!tokenHash) throw new Error("Token login RFID tidak tersedia.");
+      return jsonResponse({ verified: true, token_hash: tokenHash });
     }
 
     const uid = normalizeRfid(readText(body.rfidTag, 64) ?? "");

@@ -8,9 +8,9 @@ Configure the project URL and publishable key in `.env` (see `.env.example`), th
 
 The home page (`/`) is the public RFID visitor kiosk, matching the first commit. It uses the `rfid-kiosk` Edge Function for check-in and self-registration; anonymous clients still have no direct read/write access to the library tables. Kiosk registration is limited to five attempts per IP per hour.
 
-Administrative routes require a staff RFID scan followed by the staff member's Supabase email and password. RLS allows library data operations only for accounts whose **App Metadata** contains `"library_role": "staff"`. To provision a staff member:
+Administrative routes use RFID-only sign-in. After a registered staff badge is scanned, the `rfid-kiosk` Edge Function verifies its UID, creates a one-time Supabase magic-link token without emailing it, and the browser exchanges that token for a normal Supabase session. Library data remains protected by RLS; only accounts whose **App Metadata** contains `"library_role": "staff"` can access it. To provision a staff member:
 
-1. Create a user under **Supabase Dashboard → Authentication → Users** and set its App Metadata to `{"library_role":"staff"}`.
+1. Create or invite a user under **Supabase Dashboard → Authentication → Users** and set its App Metadata to `{"library_role":"staff"}`.
 2. Register that user's badge in **SQL Editor**, replacing the email and UID:
 
    ```sql
@@ -20,9 +20,9 @@ Administrative routes require a staff RFID scan followed by the staff member's S
    where lower(email) = lower('staf@example.com');
    ```
 
-3. Give the user their Supabase email and password. App Metadata changes take effect after the user signs in again.
+3. Staff sign in by scanning their registered badge and selecting **Masuk dengan RFID**. No email or password is entered in the application.
 
-The RFID scan is an additional check in the application's login flow, not Supabase MFA: the Supabase password and staff App Metadata remain the actual database authorization. The Edge Function is public for kiosk use but only accepts the three bounded RFID actions and applies per-IP rate limits.
+RFID-only access is less secure than password plus MFA: badge UIDs can be copied, and anyone with a copied UID may sign in as that staff account. Revoke a lost badge by deleting its row from `staff_rfid_badges`. The Edge Function remains public for kiosk use, restricts requests to the supported actions, and applies per-IP rate limits.
 
 ## RFID Reader
 
@@ -33,7 +33,7 @@ pip install Flask flask-cors pyscard
 python lib/rfid/server.py
 ```
 
-The browser client uses `http://localhost:5000` by default. Set `NEXT_PUBLIC_RFID_API_URL` for another host or port. The reader is polled on the visitor kiosk and the staff login screen. Visitor scans are checked and recorded through the Edge Function; unknown cards can use the original public registration form.
+The browser client uses `http://localhost:5000` by default. Set `NEXT_PUBLIC_RFID_API_URL` for another host or port. The reader is polled on the visitor kiosk and the staff sign-in screen. Visitor scans are checked and recorded through the Edge Function; unknown cards can use the original public registration form.
 
 ### Windows service installer
 

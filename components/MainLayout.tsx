@@ -14,8 +14,6 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(Boolean(supabase));
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [signingIn, setSigningIn] = useState(false);
   const [staffRfidUid, setStaffRfidUid] = useState("");
@@ -100,21 +98,33 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
       const { data: badgeResponse, error: badgeError } = await supabase.functions.invoke("rfid-kiosk", {
         body: {
           action: "verify_staff",
-          email: email.trim(),
           rfidTag: staffRfidUid,
         },
       });
       if (badgeError) throw badgeError;
-      if (!badgeResponse || typeof badgeResponse !== "object" || badgeResponse.verified !== true) {
+      if (
+        !badgeResponse ||
+        typeof badgeResponse !== "object" ||
+        badgeResponse.verified !== true ||
+        typeof badgeResponse.token_hash !== "string"
+      ) {
         throw new Error("Kartu RFID tidak terdaftar untuk akun staf ini.");
       }
 
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.verifyOtp({
+        token_hash: badgeResponse.token_hash,
+        type: "magiclink",
+      });
       if (error) throw error;
-      setPassword("");
+      if (data.user?.app_metadata.library_role !== "staff") {
+        const { error: signOutError } = await supabase.auth.signOut();
+        if (signOutError) throw signOutError;
+        throw new Error("Akun ini belum diberi akses staf.");
+      }
+
       setStaffRfidUid("");
     } catch (error) {
-      setAuthError(error instanceof Error ? error.message : "Login gagal. Periksa email dan kata sandi.");
+      setAuthError(error instanceof Error ? error.message : "Login RFID gagal.");
     } finally {
       setSigningIn(false);
     }
@@ -158,7 +168,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
           <div className="text-center">
             <h1 className="text-xl font-bold text-slate-900">Login Staf Perpustakaan</h1>
             <p className="mt-2 text-sm text-slate-600">
-              Masuk dengan akun staf yang dibuat di Supabase Authentication.
+              Pindai kartu RFID staf untuk masuk.
             </p>
           </div>
 
@@ -202,36 +212,12 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
                     : readerError || "Menunggu koneksi ke server RFID."}
               </div>
 
-              <label className="block space-y-1.5 text-sm font-medium text-slate-700">
-                Email staf
-                <input
-                  type="email"
-                  autoComplete="username"
-                  required
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal"
-                />
-              </label>
-
-              <label className="block space-y-1.5 text-sm font-medium text-slate-700">
-                Kata sandi
-                <input
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal"
-                />
-              </label>
-
               <button
                 type="submit"
                 disabled={!supabase || signingIn || !staffRfidUid}
                 className="w-full rounded-lg bg-blue-700 px-4 py-2.5 font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {signingIn ? "Memproses..." : "Masuk"}
+                {signingIn ? "Memverifikasi kartu..." : "Masuk dengan RFID"}
               </button>
             </>
           ) : (
@@ -244,7 +230,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
             </button>
           )}
           <p className="text-center text-xs text-slate-500">
-            Akun staf dibuat oleh administrator di Supabase. Pendaftaran anggota tersedia di halaman utama RFID.
+            Kartu staf harus didaftarkan oleh administrator. Pendaftaran anggota tersedia di halaman utama RFID.
           </p>
         </form>
       </main>
