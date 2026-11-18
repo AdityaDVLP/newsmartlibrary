@@ -120,7 +120,19 @@ export interface RssiPoint {
   label: string;
 }
 
+export interface KioskVisitor {
+  nama: string;
+  rfidTag: string;
+}
+
 const normalizeRfid = (value: string) => value.replace(/[^a-z0-9]/gi, "").toUpperCase();
+
+const requireSupabase = () => {
+  if (!supabase) {
+    throw new Error("Supabase belum dikonfigurasi. Periksa URL dan publishable key di file .env.");
+  }
+  return supabase;
+};
 
 const mergeVisitorLogs = (...logGroups: VisitorLog[][]) => {
   const logsById = new Map<string, VisitorLog>();
@@ -147,6 +159,8 @@ interface LibraryContextType {
   connectionStatus: "Connected" | "Connecting..." | "Disconnected";
   toggleRfid: () => void;
   setTxPower: (power: number) => void;
+  checkInVisitorByRfid: (rfidTag: string) => Promise<KioskVisitor | null>;
+  registerMemberFromKiosk: (member: Omit<Member, "id" | "dateRegistered">) => Promise<void>;
   addMember: (member: Omit<Member, "id" | "dateRegistered">) => Promise<void>;
   updateMember: (id: string, updatedData: Partial<Member>) => Promise<void>;
   deleteMember: (id: string) => Promise<void>;
@@ -162,9 +176,12 @@ interface LibraryContextType {
 
 const LibraryContext = createContext<LibraryContextType | undefined>(undefined);
 
-export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const LibraryProvider: React.FC<{
+  children: React.ReactNode;
+  mode?: "staff" | "kiosk";
+}> = ({ children, mode = "staff" }) => {
   const [members, setMembers] = useState<Member[]>([]);
-  const [membersLoaded, setMembersLoaded] = useState(false);
+  const [membersLoaded, setMembersLoaded] = useState(mode === "kiosk");
   const [books, setBooks] = useState<Book[]>([]);
   const [loans, setLoans] = useState<Loan[]>([]);
   const [visitorLogs, setVisitorLogs] = useState<VisitorLog[]>([]);
@@ -180,12 +197,57 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [txPower, setTxPower] = useState<number>(20);
   const [connectionStatus, setConnectionStatus] = useState<"Connected" | "Connecting..." | "Disconnected">("Connected");
 
-  const requireSupabase = () => {
-    if (!supabase) {
-      throw new Error("Supabase belum dikonfigurasi. Periksa URL dan publishable key di file .env.");
+  const checkInVisitorByRfid = useCallback(async (rfidTag: string): Promise<KioskVisitor | null> => {
+    try {
+      const { data, error } = await requireSupabase().functions.invoke("rfid-kiosk", {
+        body: { action: "checkin", rfidTag },
+      });
+      if (error) throw new Error(error.message);
+      if (!data || typeof data !== "object") {
+        throw new Error("Respons check-in RFID tidak valid.");
+      }
+
+      const result = data as Record<string, unknown>;
+      if (result.registered === false) {
+        setDatabaseError(null);
+        return null;
+      }
+      if (result.registered !== true || typeof result.nama !== "string" || typeof result.rfid_tag !== "string") {
+        throw new Error("Respons check-in RFID tidak lengkap.");
+      }
+
+      setDatabaseError(null);
+      return { nama: result.nama, rfidTag: result.rfid_tag };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDatabaseError(`Gagal mencatat check-in RFID: ${message}`);
+      throw error instanceof Error ? error : new Error(message);
     }
-    return supabase;
-  };
+  }, []);
+
+  const registerMemberFromKiosk = useCallback(async (member: Omit<Member, "id" | "dateRegistered">) => {
+    try {
+      const { data, error } = await requireSupabase().functions.invoke("rfid-kiosk", {
+        body: {
+          action: "register",
+          nim: member.nim,
+          nama: member.nama,
+          prodi: member.prodi,
+          status: member.status,
+          rfidTag: member.rfidTag,
+        },
+      });
+      if (error) throw new Error(error.message);
+      if (!data || typeof data !== "object" || data.registered !== true) {
+        throw new Error("Respons pendaftaran RFID tidak valid.");
+      }
+      setDatabaseError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDatabaseError(`Gagal mendaftarkan anggota: ${message}`);
+      throw error instanceof Error ? error : new Error(message);
+    }
+  }, []);
 
   const mapMemberFromDb = (row: Record<string, unknown>): Member => ({
     id: String(row.id ?? ""),
@@ -428,9 +490,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   useEffect(() => {
+    if (mode === "kiosk") return;
+
     const timer = window.setTimeout(() => void loadSupabaseData(), 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     if (!rfidActive) return;
@@ -454,11 +518,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
         setRfidUid(detectedUid);
         setRfidScanVersion((version) => version + 1);
-        setPendingVisitorScans((previous) => [...previous, {
-          id: globalThis.crypto.randomUUID(),
-          uid: detectedUid,
-          scannedAt: new Date().toISOString(),
-        }].slice(-16));
+        if (mode !== "kiosk") {
+          setPendingVisitorScans((previous) => [...previous, {
+            id: globalThis.crypto.randomUUID(),
+            uid: detectedUid,
+            scannedAt: new Date().toISOString(),
+          }].slice(-16));
+        }
       } catch {
         if (!cancelled) setConnectionStatus("Disconnected");
       }
@@ -470,10 +536,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       cancelled = true;
       clearInterval(interval);
     };
-  }, [rfidActive]);
+  }, [mode, rfidActive]);
 
   useEffect(() => {
-    if (!membersLoaded || pendingVisitorScans.length === 0) return;
+    if (mode === "kiosk" || !membersLoaded || pendingVisitorScans.length === 0) return;
 
     const timeoutId = window.setTimeout(() => {
       const newLogs = pendingVisitorScans.flatMap((scan) => {
@@ -516,7 +582,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
-  }, [members, membersLoaded, pendingVisitorScans, reportBackgroundDatabaseError]);
+  }, [members, membersLoaded, mode, pendingVisitorScans, reportBackgroundDatabaseError]);
 
   const toggleRfid = () => {
     setRfidActive((prev) => !prev);
@@ -799,6 +865,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         connectionStatus,
         toggleRfid,
         setTxPower,
+        checkInVisitorByRfid,
+        registerMemberFromKiosk,
         addMember,
         updateMember,
         deleteMember,

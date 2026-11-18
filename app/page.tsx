@@ -8,14 +8,12 @@ import {
   CheckCircle2,
   ChevronDown,
   Leaf,
-  LogOut,
   ShieldCheck,
   UserRound,
   Volume2,
 } from "lucide-react";
 import { useLibrary } from "../context/LibraryContext";
 import type { MemberCategory } from "../context/LibraryContext";
-import { supabase } from "../lib/supabase";
 
 const PRODI_ITK = [
   "Informatika",
@@ -55,11 +53,21 @@ function speakMessage(message: string) {
 }
 
 export default function Home() {
-  const { members, membersLoaded, rfidUid, rfidScanVersion, rfidActive, connectionStatus, addMember } = useLibrary();
+  const {
+    rfidUid,
+    rfidScanVersion,
+    rfidActive,
+    connectionStatus,
+    checkInVisitorByRfid,
+    registerMemberFromKiosk,
+  } = useLibrary();
   const [welcomeVisible, setWelcomeVisible] = useState(false);
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
-  const [signOutError, setSignOutError] = useState("");
+  const [scannedMember, setScannedMember] = useState<{ nama: string; rfidTag: string } | null>(null);
+  const [resolvedScanVersion, setResolvedScanVersion] = useState(rfidScanVersion);
+  const [scanLookupError, setScanLookupError] = useState("");
   const lastProcessedScanVersion = useRef(rfidScanVersion);
+  const lastWelcomedScanVersion = useRef(rfidScanVersion);
   const lastSpokenScanVersion = useRef(rfidScanVersion);
 
   // Inline registration form state
@@ -92,7 +100,7 @@ export default function Home() {
     setRegisterSaving(true);
     setRegisterError("");
     try {
-      await addMember({
+      await registerMemberFromKiosk({
         nim: regForm.nim,
         nama: regForm.nama,
         prodi: regForm.prodi,
@@ -109,11 +117,6 @@ export default function Home() {
     }
   };
 
-
-  const scannedMember = members.find(
-    (member) => member.rfidTag.replace(/\s/g, "").toUpperCase() === rfidUid
-  );
-
   const enableNotificationSound = () => {
     if (!("speechSynthesis" in window)) {
       console.warn("Welcome speech is not supported by this browser.");
@@ -123,15 +126,32 @@ export default function Home() {
     setNotificationSoundEnabled(true);
   };
 
-  const handleSignOut = async () => {
-    if (!supabase) return;
-    const { error } = await supabase.auth.signOut();
-    if (error) setSignOutError(error.message);
-  };
-
   useEffect(() => {
     if (!rfidUid || rfidScanVersion === lastProcessedScanVersion.current) return;
     lastProcessedScanVersion.current = rfidScanVersion;
+    setScannedMember(null);
+    setResolvedScanVersion(-1);
+    setScanLookupError("");
+    let active = true;
+    void checkInVisitorByRfid(rfidUid)
+      .then((member) => {
+        if (!active) return;
+        setScannedMember(member);
+        setResolvedScanVersion(rfidScanVersion);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setScanLookupError(error instanceof Error ? error.message : "Kartu tidak dapat diperiksa.");
+        setResolvedScanVersion(rfidScanVersion);
+      });
+    return () => {
+      active = false;
+    };
+  }, [checkInVisitorByRfid, rfidScanVersion, rfidUid]);
+
+  useEffect(() => {
+    if (!rfidUid || rfidScanVersion === lastWelcomedScanVersion.current) return;
+    lastWelcomedScanVersion.current = rfidScanVersion;
     const showWelcome = window.setTimeout(() => setWelcomeVisible(true), 0);
     const hideWelcome = window.setTimeout(() => setWelcomeVisible(false), 7000);
     return () => {
@@ -141,12 +161,17 @@ export default function Home() {
   }, [rfidScanVersion, rfidUid]);
 
   useEffect(() => {
-    if (!notificationSoundEnabled || !membersLoaded || !rfidUid || rfidScanVersion === lastSpokenScanVersion.current) return;
+    if (
+      !notificationSoundEnabled ||
+      !rfidUid ||
+      resolvedScanVersion !== rfidScanVersion ||
+      rfidScanVersion === lastSpokenScanVersion.current
+    ) return;
     lastSpokenScanVersion.current = rfidScanVersion;
     speakMessage(scannedMember
       ? `Selamat datang, ${scannedMember.nama}, di perpustakaan.`
       : "Maaf, Anda belum terdaftar. Silakan mendaftar.");
-  }, [membersLoaded, notificationSoundEnabled, rfidScanVersion, rfidUid, scannedMember]);
+  }, [notificationSoundEnabled, resolvedScanVersion, rfidScanVersion, rfidUid, scannedMember]);
 
   return (
     <div
@@ -256,24 +281,9 @@ export default function Home() {
           <div className="home-header-divider" style={{ width: 1, height: 20, background: "#e2e8f0" }} />
           <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 700, color: "#0f2346" }}>
             <UserRound size={17} />
-            <span className="home-visitor-label">Staf Perpustakaan</span>
-            <button
-              type="button"
-              onClick={() => void handleSignOut()}
-              aria-label="Keluar dari akun staf"
-              title="Keluar"
-              style={{ display: "inline-flex", alignItems: "center", gap: 5, border: "1px solid #cbd5e1", borderRadius: 999, padding: "6px 10px", background: "white", color: "#334155", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-            >
-              <LogOut size={14} />
-              Keluar
-            </button>
+            <span className="home-visitor-label">Pengunjung</span>
           </div>
         </div>
-        {signOutError && (
-          <p role="alert" style={{ position: "absolute", right: 24, top: 62, zIndex: 30, margin: 0, padding: "8px 12px", borderRadius: 8, background: "#fff1f2", color: "#be123c", fontSize: 12 }}>
-            Gagal keluar: {signOutError}
-          </p>
-        )}
       </header>
 
       {/* â”€â”€ MAIN CONTENT â”€â”€ */}
@@ -499,7 +509,11 @@ export default function Home() {
 
                 {/* Status text below RFID image */}
                 <div style={{ width: "100%" }}>
-                  {welcomeVisible && scannedMember ? (
+                  {welcomeVisible && resolvedScanVersion === rfidScanVersion && scanLookupError ? (
+                    <p role="alert" style={{ margin: 0, color: "#be123c", fontSize: 13 }}>
+                      Gagal memeriksa kartu: {scanLookupError}
+                    </p>
+                  ) : welcomeVisible && resolvedScanVersion === rfidScanVersion && scannedMember ? (
                     <>
                       <div style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 999, background: "#d1fae5", padding: "5px 14px", fontSize: 11, fontWeight: 700, color: "#065f46" }}>
                         <CheckCircle2 size={14} /> Kunjungan Tercatat
@@ -509,7 +523,7 @@ export default function Home() {
                       <p style={{ marginTop: 4, fontSize: 13, fontWeight: 600, color: "#64748b" }}>di Perpustakaan ITK</p>
                       <p style={{ marginTop: 8, fontSize: 11, color: "#94a3b8" }}>RFID: {rfidUid}</p>
                     </>
-                  ) : welcomeVisible && rfidUid && !scannedMember ? (
+                  ) : welcomeVisible && resolvedScanVersion === rfidScanVersion && rfidUid && !scannedMember ? (
                     <>
                       <div style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 999, background: "#fee2e2", padding: "5px 14px", fontSize: 11, fontWeight: 700, color: "#991b1b" }}>
                         Kartu Belum Terdaftar

@@ -6,7 +6,23 @@ The application uses Supabase for members, books, visitor and book logs, activit
 
 Configure the project URL and publishable key in `.env` (see `.env.example`), then restart the Next.js server. Do not put a `service_role` key in a `NEXT_PUBLIC_` variable. For deployments, set the same two public variables in the hosting provider's environment settings.
 
-The app requires staff authentication. RLS allows data operations only for accounts whose **App Metadata** contains `"library_role": "staff"`; public sign-up is not enabled in the app. Create a user under **Supabase Dashboard → Authentication → Users**, set its App Metadata to `{"library_role":"staff"}`, then provide the credentials to staff. Changes to App Metadata take effect after the user signs in again.
+The home page (`/`) is the public RFID visitor kiosk, matching the first commit. It uses the `rfid-kiosk` Edge Function for check-in and self-registration; anonymous clients still have no direct read/write access to the library tables. Kiosk registration is limited to five attempts per IP per hour.
+
+Administrative routes require a staff RFID scan followed by the staff member's Supabase email and password. RLS allows library data operations only for accounts whose **App Metadata** contains `"library_role": "staff"`. To provision a staff member:
+
+1. Create a user under **Supabase Dashboard → Authentication → Users** and set its App Metadata to `{"library_role":"staff"}`.
+2. Register that user's badge in **SQL Editor**, replacing the email and UID:
+
+   ```sql
+   insert into public.staff_rfid_badges (user_id, rfid_uid)
+   select id, regexp_replace(upper('UID_KARTU_STAF'), '[^A-Z0-9]', '', 'g')
+   from auth.users
+   where lower(email) = lower('staf@example.com');
+   ```
+
+3. Give the user their Supabase email and password. App Metadata changes take effect after the user signs in again.
+
+The RFID scan is an additional check in the application's login flow, not Supabase MFA: the Supabase password and staff App Metadata remain the actual database authorization. The Edge Function is public for kiosk use but only accepts the three bounded RFID actions and applies per-IP rate limits.
 
 ## RFID Reader
 
@@ -17,7 +33,7 @@ pip install Flask flask-cors pyscard
 python lib/rfid/server.py
 ```
 
-The browser client uses `http://localhost:5000` by default. Set `NEXT_PUBLIC_RFID_API_URL` for another host or port. Shared polling fills the member registration UID and creates visitor log entries when a scan matches a registered member.
+The browser client uses `http://localhost:5000` by default. Set `NEXT_PUBLIC_RFID_API_URL` for another host or port. The reader is polled on the visitor kiosk and the staff login screen. Visitor scans are checked and recorded through the Edge Function; unknown cards can use the original public registration form.
 
 ### Windows service installer
 
