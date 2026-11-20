@@ -20,13 +20,32 @@ import {
   Globe,
   Users,
   Download,
+  Upload,
+  AlertCircle,
 } from "lucide-react";
 import { useLibrary, Member, MemberCategory, getInitials, getAvatarColor } from "../../../context/LibraryContext";
+import { getRfidUid } from "../../../lib/rfid";
 import ExportModal, { ExportColumn } from "../../../components/ExportModal";
+import ImportModal, { ImportColumnDefinition } from "../../../components/ImportModal";
 
 const getDatabaseErrorMessage = (error: unknown, fallback: string) => {
   if (typeof error === "object" && error !== null) {
     const databaseError = error as { code?: string; message?: string; details?: string; hint?: string };
+    if (databaseError.code === "23503" || databaseError.message?.includes("book_loans_member_id_fkey")) {
+      return "Tidak dapat menghapus anggota: Masih terdapat data peminjaman buku yang terhubung dengan anggota ini di database. Pastikan buku telah dikembalikan terlebih dahulu.";
+    }
+    if (databaseError.code === "23505" || databaseError.message?.includes("duplicate key")) {
+      if (databaseError.message?.includes("nim") || databaseError.details?.includes("nim")) {
+        return "Gagal menyimpan: NIM / ID ini sudah terdaftar pada anggota lain.";
+      }
+      if (databaseError.message?.includes("rfid_tag") || databaseError.details?.includes("rfid_tag")) {
+        return "Gagal menyimpan: UID Tag RFID ini sudah terdaftar pada anggota lain.";
+      }
+      return "Gagal menyimpan: Data anggota (NIM atau UID) sudah terdaftar di sistem.";
+    }
+    if (databaseError.code === "42501" || databaseError.message?.includes("row-level security") || databaseError.message?.includes("permission denied")) {
+      return "Akses database ditolak oleh aturan keamanan RLS Supabase. Silakan jalankan script SQL migrasi izin publik di Supabase SQL Editor.";
+    }
     const description = [databaseError.message, databaseError.details, databaseError.hint]
       .filter((part): part is string => Boolean(part))
       .join(" | ");
@@ -39,7 +58,7 @@ const getDatabaseErrorMessage = (error: unknown, fallback: string) => {
 };
 
 export default function PendaftaranAnggotaPage() {
-  const { members, addMember, updateMember, deleteMember, rfidUid } = useLibrary();
+  const { members, addMember, updateMember, deleteMember, importMembers, rfidUid, rfidScanVersion } = useLibrary();
 
   // Form states (Add)
   const [nim, setNim] = useState("");
@@ -57,10 +76,43 @@ export default function PendaftaranAnggotaPage() {
 
   // Modals
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [viewingMember, setViewingMember] = useState<Member | null>(null);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
   const [crudError, setCrudError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [hfToast, setHfToast] = useState("");
+
+  const memberImportColumns: ImportColumnDefinition[] = [
+    { key: "nim", label: "NIM / NIP / ID", required: true, aliases: ["nim", "nip", "id", "no_induk"] },
+    { key: "nama", label: "Nama Lengkap", required: true, aliases: ["nama", "nama_lengkap", "name"] },
+    { key: "status", label: "Kategori", required: false, defaultValue: "Mahasiswa", aliases: ["kategori", "status", "role"] },
+    { key: "prodi", label: "Program Studi", required: false, defaultValue: "Informatika", aliases: ["prodi", "jurusan", "departemen", "instansi"] },
+    { key: "email", label: "Email", required: false, aliases: ["email", "surel"] },
+    { key: "noHp", label: "No. Handphone", required: false, defaultValue: "-", aliases: ["nohp", "no_hp", "telepon", "telp", "phone"] },
+    { key: "rfidTag", label: "UID RFID", required: false, defaultValue: "Belum Ada", isTagField: true, aliases: ["rfidtag", "rfid_tag", "uid", "tag", "kartu"] },
+  ];
+
+  const memberImportSampleData = [
+    {
+      nim: "10211001",
+      nama: "Ahmad Dahlan",
+      status: "Mahasiswa",
+      prodi: "Informatika",
+      email: "10211001@student.itk.ac.id",
+      noHp: "081234567890",
+      rfidTag: "A1B2C3D4",
+    },
+    {
+      nim: "10211002",
+      nama: "Siti Rahmawati",
+      status: "Mahasiswa",
+      prodi: "Sistem Informasi",
+      email: "10211002@student.itk.ac.id",
+      noHp: "081298765432",
+      rfidTag: "",
+    },
+  ];
 
   // Export Modal State
   const [exportModalConfig, setExportModalConfig] = useState<{
@@ -92,14 +144,55 @@ export default function PendaftaranAnggotaPage() {
   const dosenPct = totalCount ? Math.round((dosenCount / totalCount) * 100) : 0;
   const visitorPct = totalCount ? Math.round((visitorCount / totalCount) * 100) : 0;
 
+  // Auto-sync HF RFID UID saat modal Edit Anggota terbuka
+  useEffect(() => {
+    if (!editingMember || !rfidUid) return;
+    const cleanUid = rfidUid.trim();
+    if (!cleanUid) return;
+
+    setEditingMember((prev) => {
+      if (!prev) return null;
+      if (prev.rfidTag === cleanUid) return prev;
+      return { ...prev, rfidTag: cleanUid };
+    });
+    setHfToast(`Kartu HF terdeteksi: ${cleanUid}`);
+    const timer = setTimeout(() => setHfToast(""), 3500);
+    return () => clearTimeout(timer);
+  }, [editingMember?.id, rfidUid, rfidScanVersion]);
+
+  // Auto-sync HF RFID UID saat modal Tambah Anggota terbuka
   useEffect(() => {
     if (!showAddModal || !rfidUid) return;
+    const cleanUid = rfidUid.trim();
+    if (!cleanUid) return;
 
-    const syncUid = window.setTimeout(() => setRfidTag(rfidUid), 0);
-    return () => window.clearTimeout(syncUid);
-  }, [showAddModal, rfidUid]);
+    setRfidTag(cleanUid);
+    setHfToast(`Kartu HF terdeteksi: ${cleanUid}`);
+    const timer = setTimeout(() => setHfToast(""), 3500);
+    return () => clearTimeout(timer);
+  }, [showAddModal, rfidUid, rfidScanVersion]);
 
-  // RFID simulation fallback when the physical reader is unavailable.
+  // Handler tombol Tap untuk mengambil UID dari server HF (http://localhost:5000)
+  const handleTapHf = async (setter: (val: string) => void) => {
+    if (rfidUid) {
+      setter(rfidUid);
+      setHfToast(`Menggunakan UID HF: ${rfidUid}`);
+      return;
+    }
+    try {
+      const res = await getRfidUid();
+      if (res.uid) {
+        setter(res.uid);
+        setHfToast(`Kartu HF berhasil dibaca: ${res.uid}`);
+      } else {
+        setHfToast("Reader HF aktif. Silakan tempelkan kartu RFID/NFC ke reader.");
+      }
+    } catch {
+      setHfToast("Server HF belum terhubung di http://localhost:5000.");
+    }
+  };
+
+  // RFID simulation fallback jika tidak ada alat fisik
   const handleAutoGenerateRfid = (setter: (val: string) => void) => {
     const randomHex = () =>
       Math.floor(Math.random() * 65536)
@@ -114,16 +207,40 @@ export default function PendaftaranAnggotaPage() {
     e.preventDefault();
     if (!nim || !nama) return;
 
+    // Validasi duplikasi NIM secara lokal
+    const duplicateNim = members.some((m) => m.nim.trim().toLowerCase() === nim.trim().toLowerCase());
+    if (duplicateNim) {
+      setCrudError(`NIM / ID "${nim}" sudah terdaftar pada anggota lain.`);
+      return;
+    }
+
+    // Validasi duplikasi RFID secara lokal jika diisi
+    const cleanTag = rfidTag.trim();
+    if (cleanTag && cleanTag !== "Belum Ada" && cleanTag !== "-") {
+      const normalized = cleanTag.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+      const duplicateTag = members.some(
+        (m) =>
+          m.rfidTag &&
+          m.rfidTag !== "Belum Ada" &&
+          m.rfidTag !== "-" &&
+          m.rfidTag.replace(/[^a-zA-Z0-9]/g, "").toUpperCase() === normalized
+      );
+      if (duplicateTag) {
+        setCrudError(`UID Tag RFID "${cleanTag}" sudah terdaftar pada anggota lain.`);
+        return;
+      }
+    }
+
     setSaving(true);
     setCrudError("");
     try {
       await addMember({
-        nim,
-        nama,
+        nim: nim.trim(),
+        nama: nama.trim(),
         prodi,
-        email,
-        noHp,
-        rfidTag: rfidTag || `E200 ${Math.floor(1000 + Math.random() * 9000)} ${Math.floor(1000 + Math.random() * 9000)}`,
+        email: email.trim() || `${nim.trim()}@student.itk.ac.id`,
+        noHp: noHp.trim() || "-",
+        rfidTag: cleanTag || "Belum Ada",
         status,
       });
 
@@ -189,6 +306,17 @@ export default function PendaftaranAnggotaPage() {
     return matchesSearch && matchesProdi && matchesKat;
   });
 
+  // Pagination anggota
+  const MEMBER_PAGE_SIZE = 10;
+  const [memberPage, setMemberPage] = useState(1);
+  // Reset ke halaman 1 saat filter berubah
+  useEffect(() => { setMemberPage(1); }, [searchQuery, prodiFilter, kategoriFilter]);
+  const memberTotalPages = Math.max(1, Math.ceil(filteredMembers.length / MEMBER_PAGE_SIZE));
+  const pagedMembers = filteredMembers.slice(
+    (memberPage - 1) * MEMBER_PAGE_SIZE,
+    memberPage * MEMBER_PAGE_SIZE
+  );
+
   return (
     <div className="space-y-6">
       {/* Page Header */}
@@ -207,6 +335,14 @@ export default function PendaftaranAnggotaPage() {
 
         <div className="flex items-center space-x-2">
           <button
+            onClick={() => setShowImportModal(true)}
+            className="flex items-center space-x-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100 transition-all shadow-2xs cursor-pointer"
+            title="Impor Data Anggota dari CSV"
+          >
+            <Upload className="h-4 w-4 text-blue-600" />
+            <span>Impor Data Anggota</span>
+          </button>
+          <button
             onClick={() =>
               setExportModalConfig({
                 isOpen: true,
@@ -216,14 +352,14 @@ export default function PendaftaranAnggotaPage() {
                 data: filteredMembers,
               })
             }
-            className="flex items-center space-x-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-all shadow-2xs"
+            className="flex items-center space-x-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-all shadow-2xs cursor-pointer"
           >
             <Download className="h-4 w-4 text-slate-600" />
             <span>Ekspor Data Anggota</span>
           </button>
           <button
             onClick={() => setShowAddModal(true)}
-            className="flex items-center space-x-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 transition-all"
+            className="flex items-center space-x-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 transition-all cursor-pointer"
           >
             <UserPlus className="h-4 w-4" />
             <span>Tambah Anggota Baru</span>
@@ -394,7 +530,7 @@ export default function PendaftaranAnggotaPage() {
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
               {filteredMembers.length > 0 ? (
-                filteredMembers.map((member) => (
+                pagedMembers.map((member) => (
                   <tr key={member.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
                       {member.nim}
@@ -429,10 +565,17 @@ export default function PendaftaranAnggotaPage() {
                     </td>
                     <td className="py-3.5 px-4 font-semibold text-slate-700">{member.prodi}</td>
                     <td className="py-3.5 px-4">
-                      <span className="inline-flex items-center space-x-1 font-mono text-[11px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
-                        <Radio className="h-3 w-3 text-blue-500" />
-                        <span>{member.rfidTag}</span>
-                      </span>
+                      {member.rfidTag && member.rfidTag !== "-" && member.rfidTag !== "Belum Ada" && !member.rfidTag.startsWith("UNASSIGNED_") ? (
+                        <span className="inline-flex items-center space-x-1 font-mono text-[11px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
+                          <Radio className="h-3 w-3 text-blue-500" />
+                          <span>{member.rfidTag}</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center space-x-1 text-[11px] font-medium text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-md border border-amber-200" title="Klik tombol Edit untuk menambahkan UID kartu">
+                          <AlertCircle className="h-3 w-3 text-amber-500" />
+                          <span>Belum Ada</span>
+                        </span>
+                      )}
                     </td>
                     <td className="py-3.5 px-4 text-center">
                       <div className="flex items-center justify-center space-x-1">
@@ -475,6 +618,37 @@ export default function PendaftaranAnggotaPage() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination */}
+        {memberTotalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-slate-100 pt-4 mt-2 px-1">
+            <p className="text-xs text-slate-500">
+              Halaman <span className="font-bold text-slate-700">{memberPage}</span> dari <span className="font-bold text-slate-700">{memberTotalPages}</span> &middot; {filteredMembers.length} anggota
+            </p>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setMemberPage(1)} disabled={memberPage === 1} className="rounded-lg px-2 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed" title="Halaman pertama">&#171;</button>
+              <button onClick={() => setMemberPage((p) => Math.max(1, p - 1))} disabled={memberPage === 1} className="rounded-lg px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed">Prev</button>
+              {Array.from({ length: memberTotalPages }, (_, i) => i + 1)
+                .filter((p) => p === 1 || p === memberTotalPages || Math.abs(p - memberPage) <= 1)
+                .reduce<(number | "...")[]>((acc, p, idx, arr) => {
+                  if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push("...");
+                  acc.push(p);
+                  return acc;
+                }, [])
+                .map((item, i) =>
+                  item === "..." ? (
+                    <span key={`el-${i}`} className="px-2 text-xs text-slate-400">...</span>
+                  ) : (
+                    <button key={item} onClick={() => setMemberPage(item as number)}
+                      className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${memberPage === item ? "bg-blue-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100"}`}
+                    >{item}</button>
+                  )
+                )}
+              <button onClick={() => setMemberPage((p) => Math.min(memberTotalPages, p + 1))} disabled={memberPage === memberTotalPages} className="rounded-lg px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed">Next</button>
+              <button onClick={() => setMemberPage(memberTotalPages)} disabled={memberPage === memberTotalPages} className="rounded-lg px-2 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed" title="Halaman terakhir">&#187;</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* MODAL 1: VIEW MEMBER DETAILS */}
@@ -663,22 +837,38 @@ export default function PendaftaranAnggotaPage() {
               </div>
 
               <div>
-                <label className="block font-bold text-slate-700 mb-1">UID Anggota</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-bold text-slate-700">UID Anggota (HF / NFC)</label>
+                  <span className="flex items-center space-x-1 text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>Server HF Terhubung</span>
+                  </span>
+                </div>
                 <div className="flex items-center space-x-1.5">
                   <input
                     type="text"
                     value={editingMember.rfidTag}
                     onChange={(e) => setEditingMember({ ...editingMember, rfidTag: e.target.value })}
-                    className="w-full font-mono rounded-xl border border-slate-200 p-2.5 text-xs text-slate-800 focus:border-blue-500 focus:outline-none"
+                    placeholder="Tempel kartu HF atau ketik UID"
+                    className="w-full font-mono font-bold text-slate-800 rounded-xl border border-slate-200 p-2.5 text-xs focus:border-blue-500 focus:outline-none"
                   />
                   <button
                     type="button"
-                    onClick={() => handleAutoGenerateRfid((val) => setEditingMember({ ...editingMember, rfidTag: val }))}
-                    className="rounded-xl border border-blue-200 bg-blue-50 px-2.5 py-2.5 text-[11px] font-bold text-blue-700 hover:bg-blue-100 shrink-0"
+                    onClick={() => handleTapHf((val) => setEditingMember({ ...editingMember, rfidTag: val }))}
+                    className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-[11px] font-bold text-blue-700 hover:bg-blue-100 shrink-0 cursor-pointer"
+                    title="Baca UID dari server HF (http://localhost:5000)"
                   >
                     Tap
                   </button>
                 </div>
+                {hfToast && (
+                  <p className="text-[11px] text-emerald-600 font-semibold mt-1">
+                    ✓ {hfToast}
+                  </p>
+                )}
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Cukup tempelkan kartu pada reader HF (NFC), UID akan terisi otomatis tanpa perlu ketik manual.
+                </p>
               </div>
 
               <div className="flex items-center justify-end space-x-3 pt-4 border-t border-slate-100">
@@ -794,25 +984,36 @@ export default function PendaftaranAnggotaPage() {
               </div>
 
               <div>
-                <label className="block font-bold text-slate-700 mb-1">UID Anggota</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-bold text-slate-700">UID Anggota (HF / NFC)</label>
+                  <span className="flex items-center space-x-1 text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>Server HF Terhubung</span>
+                  </span>
+                </div>
                 <div className="flex items-center space-x-2">
                   <input
                     type="text"
-                    placeholder="E200 XXXX XXXX"
+                    placeholder="Tempel kartu HF atau kosongkan jika belum ada"
                     value={rfidTag}
                     onChange={(e) => setRfidTag(e.target.value)}
-                    className="flex-1 font-mono rounded-xl border border-slate-200 p-2.5 text-xs text-slate-800 focus:border-blue-500 focus:outline-none"
+                    className="flex-1 font-mono font-bold text-slate-800 rounded-xl border border-slate-200 p-2.5 text-xs focus:border-blue-500 focus:outline-none"
                   />
                   <button
                     type="button"
-                    onClick={() => handleAutoGenerateRfid(setRfidTag)}
-                    className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100"
+                    onClick={() => handleTapHf(setRfidTag)}
+                    className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100 cursor-pointer"
                   >
-                    Simulasi Tap
+                    Tap HF
                   </button>
                 </div>
+                {hfToast && (
+                  <p className="text-[11px] text-emerald-600 font-semibold mt-1">
+                    ✓ {hfToast}
+                  </p>
+                )}
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Tempelkan kartu RFID pada RFID Reader atau klik Simulasi Tap.
+                  Tempelkan kartu RFID pada reader HF, UID akan otomatis terisi.
                 </p>
               </div>
 
@@ -836,6 +1037,36 @@ export default function PendaftaranAnggotaPage() {
           </div>
         </div>
       )}
+      {/* IMPORT MODAL */}
+      <ImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        title="Impor Data Anggota Perpustakaan"
+        entityName="Anggota"
+        columns={memberImportColumns}
+        sampleData={memberImportSampleData}
+        onImport={async (rows) => {
+          try {
+            const memberList = rows.map((r) => ({
+              nim: r.nim,
+              nama: r.nama,
+              prodi: r.prodi || "Informatika",
+              status: (r.status || "Mahasiswa") as MemberCategory,
+              email: r.email || `${r.nim}@student.itk.ac.id`,
+              noHp: r.noHp || "-",
+              rfidTag: r.rfidTag && r.rfidTag !== "Belum Ada" && r.rfidTag !== "-" ? r.rfidTag : "Belum Ada",
+            }));
+            const count = await importMembers(memberList);
+            return { successCount: count, errorCount: 0 };
+          } catch (err) {
+            return {
+              successCount: 0,
+              errorCount: rows.length,
+              errorMessage: err instanceof Error ? err.message : "Gagal mengimpor data anggota ke database.",
+            };
+          }
+        }}
+      />
       {/* EXPORT MODAL */}
       {exportModalConfig && (
         <ExportModal

@@ -28,6 +28,7 @@ import {
   Unlock,
   GripVertical,
   RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { useLibrary, Member, getInitials, getAvatarColor } from "../../context/LibraryContext";
 import ExportModal, { ExportColumn } from "../../components/ExportModal";
@@ -53,12 +54,18 @@ export default function DashboardPage() {
     setTxPower,
     toggleRfid,
     connectionStatus,
+    clearBookLogs,
+    clearVisitorLogs,
   } = useLibrary();
 
   // Search & Filter States
   const [visitorSearch, setVisitorSearch] = useState("");
   const [visitorFilter, setVisitorFilter] = useState("Semua");
+  const [visitorLogPage, setVisitorLogPage] = useState(1);
+  const VISITOR_LOG_PAGE_SIZE = 5;
   const [bookSearch, setBookSearch] = useState("");
+  const [bookLogPage, setBookLogPage] = useState(1);
+  const BOOK_LOG_PAGE_SIZE = 5;
 
   // Viewing Member Identity Modal State
   const [viewingMember, setViewingMember] = useState<Member | null>(null);
@@ -553,13 +560,33 @@ export default function DashboardPage() {
         );
       }
 
-      case "log_pengunjung":
+      case "log_pengunjung": {
+        const totalVisitorLogPages = Math.max(1, Math.ceil(filteredVisitorLogs.length / VISITOR_LOG_PAGE_SIZE));
+        const currentVisitorLogPage = Math.min(visitorLogPage, totalVisitorLogPages);
+        const paginatedVisitorLogs = filteredVisitorLogs.slice(
+          (currentVisitorLogPage - 1) * VISITOR_LOG_PAGE_SIZE,
+          currentVisitorLogPage * VISITOR_LOG_PAGE_SIZE
+        );
+
         return (
           <div className="h-full rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition-shadow hover:shadow-md flex flex-col justify-between">
             <div>
               {renderCardHeaderWrapper(
                 "LOG PENGUNJUNG",
                 <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => {
+                      if (window.confirm("Bersihkan semua catatan log pengunjung? Data di log akan direset.")) {
+                        void clearVisitorLogs();
+                        setVisitorLogPage(1);
+                      }
+                    }}
+                    className="flex items-center space-x-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 transition-all cursor-pointer"
+                    title="Bersihkan Log Pengunjung"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                    <span>Bersihkan</span>
+                  </button>
                   <button
                     onClick={() =>
                       setExportModalConfig({
@@ -570,14 +597,14 @@ export default function DashboardPage() {
                         data: filteredVisitorLogs,
                       })
                     }
-                    className="flex items-center space-x-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-all"
+                    className="flex items-center space-x-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-all cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5" />
                     <span>Export</span>
                   </button>
                   <button
                     onClick={toggleRfid}
-                    className={`flex items-center space-x-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${
+                    className={`flex items-center space-x-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
                       rfidActive
                         ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                         : "border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100"
@@ -597,13 +624,19 @@ export default function DashboardPage() {
                     type="text"
                     placeholder="Cari nama, NIM/NIP..."
                     value={visitorSearch}
-                    onChange={(e) => setVisitorSearch(e.target.value)}
+                    onChange={(e) => {
+                      setVisitorSearch(e.target.value);
+                      setVisitorLogPage(1);
+                    }}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-2 text-xs text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-none transition-all"
                   />
                 </div>
                 <select
                   value={visitorFilter}
-                  onChange={(e) => setVisitorFilter(e.target.value)}
+                  onChange={(e) => {
+                    setVisitorFilter(e.target.value);
+                    setVisitorLogPage(1);
+                  }}
                   className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs font-bold text-slate-700 focus:border-blue-500 focus:outline-none transition-all"
                 >
                   <option value="Semua">Semua</option>
@@ -626,8 +659,8 @@ export default function DashboardPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50 font-medium text-slate-700">
-                    {filteredVisitorLogs.length > 0 ? (
-                      filteredVisitorLogs.slice(0, 5).map((log) => {
+                    {paginatedVisitorLogs.length > 0 ? (
+                      paginatedVisitorLogs.map((log) => {
                         const matchedMember = members.find((m) => m.nim === log.nim || m.nama === log.nama);
 
                         return (
@@ -688,7 +721,7 @@ export default function DashboardPage() {
                                   setViewingMember(mData);
                                 }}
                                 title={`Lihat Kartu Identitas (${log.nama})`}
-                                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-600 transition-all hover:bg-indigo-600 hover:text-white shadow-2xs group"
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-600 transition-all hover:bg-indigo-600 hover:text-white shadow-2xs group cursor-pointer"
                               >
                                 <User className="h-3.5 w-3.5" />
                               </button>
@@ -698,7 +731,7 @@ export default function DashboardPage() {
                       })
                     ) : (
                       <tr>
-                        <td colSpan={4} className="py-8 text-center text-slate-400">
+                        <td colSpan={5} className="py-8 text-center text-slate-400">
                           Belum ada data kunjungan.
                         </td>
                       </tr>
@@ -706,17 +739,66 @@ export default function DashboardPage() {
                   </tbody>
                 </table>
               </div>
+
+              {/* Pagination Controls */}
+              {filteredVisitorLogs.length > 0 && (
+                <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
+                  <div>
+                    Halaman <span className="font-bold text-slate-700">{currentVisitorLogPage}</span> dari{" "}
+                    <span className="font-bold text-slate-700">{totalVisitorLogPages}</span> ({filteredVisitorLogs.length} total data)
+                  </div>
+                  <div className="flex items-center space-x-1.5">
+                    <button
+                      type="button"
+                      disabled={currentVisitorLogPage <= 1}
+                      onClick={() => setVisitorLogPage((prev) => Math.max(1, prev - 1))}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      Sebelumnya
+                    </button>
+                    <button
+                      type="button"
+                      disabled={currentVisitorLogPage >= totalVisitorLogPages}
+                      onClick={() => setVisitorLogPage((prev) => Math.min(totalVisitorLogPages, prev + 1))}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      Selanjutnya
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );
+      }
 
-      case "log_buku":
+      case "log_buku": {
+        const totalBookLogPages = Math.max(1, Math.ceil(filteredBookLogs.length / BOOK_LOG_PAGE_SIZE));
+        const currentBookLogPage = Math.min(bookLogPage, totalBookLogPages);
+        const paginatedBookLogs = filteredBookLogs.slice(
+          (currentBookLogPage - 1) * BOOK_LOG_PAGE_SIZE,
+          currentBookLogPage * BOOK_LOG_PAGE_SIZE
+        );
+
         return (
           <div className="h-full rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition-shadow hover:shadow-md flex flex-col justify-between">
             <div>
               {renderCardHeaderWrapper(
                 "LOG BUKU",
                 <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => {
+                      if (window.confirm("Bersihkan semua catatan log buku? Data di log akan direset.")) {
+                        void clearBookLogs();
+                        setBookLogPage(1);
+                      }
+                    }}
+                    className="flex items-center space-x-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 transition-all cursor-pointer"
+                    title="Bersihkan Log Buku"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                    <span>Bersihkan</span>
+                  </button>
                   <button
                     onClick={() =>
                       setExportModalConfig({
@@ -742,7 +824,10 @@ export default function DashboardPage() {
                   type="text"
                   placeholder="Cari ISBN, judul, kategori..."
                   value={bookSearch}
-                  onChange={(e) => setBookSearch(e.target.value)}
+                  onChange={(e) => {
+                    setBookSearch(e.target.value);
+                    setBookLogPage(1);
+                  }}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-2 text-xs text-slate-800 focus:border-blue-500 focus:bg-white focus:outline-none transition-all"
                 />
               </div>
@@ -759,8 +844,8 @@ export default function DashboardPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50 font-medium text-slate-700">
-                    {filteredBookLogs.length > 0 ? (
-                      filteredBookLogs.slice(0, 5).map((log) => (
+                    {paginatedBookLogs.length > 0 ? (
+                      paginatedBookLogs.map((log) => (
                         <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
                           <td className="py-2.5 px-2 font-mono text-slate-500 text-[11px]">
                             {log.waktu}
@@ -786,9 +871,38 @@ export default function DashboardPage() {
                   </tbody>
                 </table>
               </div>
+
+              {/* Pagination Controls */}
+              {filteredBookLogs.length > 0 && (
+                <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
+                  <div>
+                    Halaman <span className="font-bold text-slate-700">{currentBookLogPage}</span> dari{" "}
+                    <span className="font-bold text-slate-700">{totalBookLogPages}</span> ({filteredBookLogs.length} total data)
+                  </div>
+                  <div className="flex items-center space-x-1.5">
+                    <button
+                      type="button"
+                      disabled={currentBookLogPage <= 1}
+                      onClick={() => setBookLogPage((prev) => Math.max(1, prev - 1))}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      Sebelumnya
+                    </button>
+                    <button
+                      type="button"
+                      disabled={currentBookLogPage >= totalBookLogPages}
+                      onClick={() => setBookLogPage((prev) => Math.min(totalBookLogPages, prev + 1))}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      Selanjutnya
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );
+      }
 
       case "rssi_monitor": {
         // Calculate points & smooth bezier path for RSSI Monitor

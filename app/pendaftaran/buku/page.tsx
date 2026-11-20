@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   BookPlus,
   Search,
@@ -24,13 +24,15 @@ import {
   AlertCircle,
   CheckCircle2,
   Download,
+  Upload,
 } from "lucide-react";
 import { useLibrary, Book } from "../../../context/LibraryContext";
 import ExportModal, { ExportColumn } from "../../../components/ExportModal";
+import ImportModal, { ImportColumnDefinition } from "../../../components/ImportModal";
 import { useUhfScanner } from "../../../lib/rfid/uhf";
 
 export default function PendaftaranBukuPage() {
-  const { books, addBook, updateBook, deleteBook } = useLibrary();
+  const { books, addBook, updateBook, deleteBook, importBooks } = useLibrary();
 
   // Form states (Add)
   const [isbn, setIsbn] = useState("");
@@ -46,6 +48,8 @@ export default function PendaftaranBukuPage() {
 
   // Lock & Validation States (Per-Eksemplar)
   const [lockedEpcs, setLockedEpcs] = useState<boolean[]>([false]);
+  const [activeScanIndex, setActiveScanIndex] = useState<number | null>(null);
+  const [uhfToast, setUhfToast] = useState<string>("");
   const [epcError, setEpcError] = useState<string | null>(null);
 
   // Search & Filter
@@ -54,50 +58,117 @@ export default function PendaftaranBukuPage() {
 
   // Modals
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [viewingBook, setViewingBook] = useState<Book | null>(null);
   const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [crudError, setCrudError] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // UHF Scan Modal state
-  const [scanTarget, setScanTarget] = useState<{
-    index: number;
-    mode: "add" | "edit";
-  } | null>(null);
+  const bookImportColumns: ImportColumnDefinition[] = [
+    { key: "isbn", label: "Nomor ISBN", required: true, aliases: ["isbn", "no_isbn", "kode_isbn"] },
+    { key: "judul", label: "Judul Buku", required: true, aliases: ["judul", "judul_buku", "title"] },
+    { key: "pengarang", label: "Pengarang / Penulis", required: false, defaultValue: "Anonim", aliases: ["pengarang", "penulis", "author"] },
+    { key: "penerbit", label: "Penerbit", required: false, defaultValue: "ITK Press", aliases: ["penerbit", "publisher"] },
+    { key: "kategori", label: "Kategori", required: false, defaultValue: "Komputer & Teknologi", aliases: ["kategori", "category", "genre"] },
+    { key: "lokasiRak", label: "Lokasi Rak", required: false, defaultValue: "Rak A-01", aliases: ["lokasi_rak", "rak", "lokasi", "shelf"] },
+    { key: "stok", label: "Stok Eksemplar", required: false, defaultValue: "1", aliases: ["stok", "jumlah", "eksemplar", "stock", "qty"] },
+    { key: "rfidTag", label: "Tag EPC RFID", required: false, defaultValue: "Belum Ada", isTagField: true, aliases: ["rfidtag", "rfid_tag", "epc", "tag", "tag_rfid"] },
+  ];
 
+  const bookImportSampleData = [
+    {
+      isbn: "978-602-03-8888-1",
+      judul: "Clean Code: Panduan Praktis Menulis Kode",
+      pengarang: "Robert C. Martin",
+      penerbit: "Prentice Hall",
+      kategori: "Komputer & Teknologi",
+      lokasiRak: "Rak A-01",
+      stok: "1",
+      rfidTag: "E280116060000204",
+    },
+    {
+      isbn: "978-602-03-8889-2",
+      judul: "Struktur Data dan Algoritma Dasar",
+      pengarang: "Bambang Hariyanto",
+      penerbit: "Informatika ITK",
+      kategori: "Komputer & Teknologi",
+      lokasiRak: "Rak B-02",
+      stok: "2",
+      rfidTag: "", // Kosongkan jika belum memiliki tag EPC (akan otomatis menjadi Belum Ada)
+    },
+  ];
+
+  // Buka Modal Edit Buku dan inisialisasi status kunci tiap eksemplar
+  const handleOpenEditBook = (book: Book) => {
+    const epcs = book.epcList && book.epcList.length > 0 ? [...book.epcList] : [book.rfidTag];
+    const stokCount = Math.max(1, book.stok || epcs.length);
+    while (epcs.length < stokCount) {
+      epcs.push("");
+    }
+    // Tag yang sudah ada dan valid dikunci, yang 'Belum Ada' atau kosong dibuka kuncinya agar siap discan
+    const initialLocks = epcs.map((tag) => Boolean(tag && tag !== "Belum Ada" && tag !== "-" && !tag.startsWith("UNASSIGNED")));
+    setLockedEpcs(initialLocks);
+    const firstUnlocked = initialLocks.findIndex((locked) => !locked);
+    setActiveScanIndex(firstUnlocked !== -1 ? firstUnlocked : null);
+    setEditingBook({
+      ...book,
+      stok: stokCount,
+      epcList: epcs,
+    });
+    setEpcError(null);
+  };
+
+  // UHF Scan auto-fill via WebSocket (ws://localhost:8765)
   const handleUhfEpc = useCallback(
     (epc: string) => {
-      if (!scanTarget) return;
+      const cleanEpc = epc.trim().toUpperCase();
+      if (!cleanEpc) return;
 
-      if (scanTarget.mode === "add") {
+      if (showAddModal) {
         setEpcList((prev) => {
+          let targetIndex = activeScanIndex;
+          if (targetIndex === null || targetIndex >= stok) {
+            targetIndex = lockedEpcs.findIndex((isLocked, idx) => idx < stok && !isLocked);
+          }
+          if (targetIndex === -1 || targetIndex >= stok) return prev;
           const next = [...prev];
-          next[scanTarget.index] = epc;
+          next[targetIndex] = cleanEpc;
           return next;
         });
-        setLockedEpcs((prev) => {
-          const next = [...prev];
-          next[scanTarget.index] = false;
-          return next;
-        });
-      } else if (scanTarget.mode === "edit" && editingBook) {
+        setUhfToast(`Tag UHF terbaca: ${cleanEpc}`);
+        setEpcError(null);
+        const timer = setTimeout(() => setUhfToast(""), 3500);
+        return () => clearTimeout(timer);
+      } else if (editingBook) {
         const epcs =
           editingBook.epcList && editingBook.epcList.length > 0
             ? [...editingBook.epcList]
             : [editingBook.rfidTag];
-        epcs[scanTarget.index] = epc;
-        setEditingBook({ ...editingBook, epcList: epcs, rfidTag: epcs[0] });
-        handleUnlockSingleEpc(scanTarget.index);
-      }
 
-      // Tutup modal scan setelah EPC diterima
-      setScanTarget(null);
+        let targetIndex = activeScanIndex;
+        if (targetIndex === null || targetIndex >= editingBook.stok) {
+          targetIndex = lockedEpcs.findIndex((isLocked, idx) => idx < editingBook.stok && !isLocked);
+        }
+        if (targetIndex === -1) {
+          targetIndex = epcs.findIndex((tag, idx) => idx < editingBook.stok && (!tag || tag === "Belum Ada" || tag === "-"));
+        }
+
+        if (targetIndex !== -1 && targetIndex < editingBook.stok) {
+          const next = [...epcs];
+          next[targetIndex] = cleanEpc;
+          setEditingBook((prev) => (prev ? { ...prev, epcList: next, rfidTag: next[0] } : null));
+          setUhfToast(`Tag UHF Eksemplar #${targetIndex + 1} terbaca: ${cleanEpc}`);
+          setEpcError(null);
+          const timer = setTimeout(() => setUhfToast(""), 3500);
+          return () => clearTimeout(timer);
+        }
+      }
     },
-    [scanTarget, editingBook]
+    [showAddModal, editingBook, lockedEpcs, stok, activeScanIndex]
   );
 
   useUhfScanner({
-    enabled: scanTarget !== null,
+    enabled: showAddModal || editingBook !== null,
     onEpc: handleUhfEpc,
   });
 
@@ -177,26 +248,20 @@ export default function PendaftaranBukuPage() {
     });
   };
 
-  const handleScanSingleEpc = (index: number) => {
-    setEpcError(null);
-    // Buka WebSocket UHF — tutup otomatis setelah EPC diterima
-    setScanTarget({ index, mode: "add" });
-  };
-
   const handleLockSingleEpc = (index: number, currentBookId?: string, listToValidate?: string[]) => {
     setEpcError(null);
     const targetEpcs = listToValidate || epcList;
     const targetEpc = (targetEpcs[index] || "").trim();
 
     if (!targetEpc) {
-      setEpcError(`⚠️ Tag EPC untuk Eksemplar #${index + 1} belum diisi/discan!`);
+      setEpcError(`Tag EPC untuk Eksemplar #${index + 1} belum diisi/discan!`);
       return false;
     }
 
     // 1. Check duplicate within current form list
     const duplicateIndex = targetEpcs.findIndex((e, i) => i !== index && e.trim() === targetEpc);
     if (duplicateIndex !== -1) {
-      setEpcError(`❌ Tag EPC "${targetEpc}" pada Eksemplar #${index + 1} terduplikat dengan Eksemplar #${duplicateIndex + 1}!`);
+      setEpcError(`TAG SUDAH DIGUNAKAN (Terduplikasi pada Eksemplar #${duplicateIndex + 1})`);
       return false;
     }
 
@@ -208,9 +273,7 @@ export default function PendaftaranBukuPage() {
     );
 
     if (existingBook) {
-      setEpcError(
-        `❌ Tag EPC "${targetEpc}" sudah terdaftar pada buku "${existingBook.judul}". Mohon gunakan tag EPC lain agar data tidak terdouble!`
-      );
+      setEpcError("TAG SUDAH DIGUNAKAN");
       return false;
     }
 
@@ -241,7 +304,7 @@ export default function PendaftaranBukuPage() {
       const next = [...prev];
       if (next.length < newCount) {
         for (let i = next.length; i < newCount; i++) {
-          next.push(generateRandomEpc());
+          next.push("");
         }
       } else if (next.length > newCount) {
         return next.slice(0, newCount);
@@ -272,7 +335,7 @@ export default function PendaftaranBukuPage() {
 
     if (nextEpcs.length < newCount) {
       for (let i = nextEpcs.length; i < newCount; i++) {
-        nextEpcs.push(generateRandomEpc());
+        nextEpcs.push("");
       }
     } else if (nextEpcs.length > newCount) {
       nextEpcs.splice(newCount);
@@ -355,9 +418,10 @@ export default function PendaftaranBukuPage() {
 
     const currentEpcs = editingBook.epcList && editingBook.epcList.length > 0 ? editingBook.epcList : [editingBook.rfidTag];
 
-    // Validate all unlocked EPCs before saving
+    // Validate all unlocked EPCs before saving (skip empty / Belum Ada if not yet assigned)
     for (let i = 0; i < currentEpcs.length; i++) {
-      if (!lockedEpcs[i]) {
+      const epcVal = (currentEpcs[i] || "").trim();
+      if (epcVal && epcVal !== "Belum Ada" && !lockedEpcs[i]) {
         const isOk = handleLockSingleEpc(i, editingBook.id, currentEpcs);
         if (!isOk) return;
       }
@@ -409,6 +473,17 @@ export default function PendaftaranBukuPage() {
     return matchesSearch && matchesKat;
   });
 
+  // Pagination buku
+  const BOOK_PAGE_SIZE = 10;
+  const [bookPage, setBookPage] = useState(1);
+  // Reset ke halaman 1 saat filter berubah
+  useEffect(() => { setBookPage(1); }, [searchQuery, kategoriFilter]);
+  const bookTotalPages = Math.max(1, Math.ceil(filteredBooks.length / BOOK_PAGE_SIZE));
+  const pagedBooks = filteredBooks.slice(
+    (bookPage - 1) * BOOK_PAGE_SIZE,
+    bookPage * BOOK_PAGE_SIZE
+  );
+
   return (
     <div className="space-y-6">
       {/* Page Header */}
@@ -427,6 +502,14 @@ export default function PendaftaranBukuPage() {
 
         <div className="flex items-center space-x-2">
           <button
+            onClick={() => setShowImportModal(true)}
+            className="flex items-center space-x-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100 transition-all shadow-2xs cursor-pointer"
+            title="Impor Data Katalog Buku dari CSV"
+          >
+            <Upload className="h-4 w-4 text-blue-600" />
+            <span>Impor Data Katalog</span>
+          </button>
+          <button
             onClick={() =>
               setExportModalConfig({
                 isOpen: true,
@@ -436,14 +519,14 @@ export default function PendaftaranBukuPage() {
                 data: filteredBooks,
               })
             }
-            className="flex items-center space-x-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-all shadow-2xs"
+            className="flex items-center space-x-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-all shadow-2xs cursor-pointer"
           >
             <Download className="h-4 w-4 text-slate-600" />
             <span>Ekspor Data Katalog</span>
           </button>
           <button
             onClick={() => { setCrudError(""); setShowAddModal(true); }}
-            className="flex items-center space-x-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 transition-all"
+            className="flex items-center space-x-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 transition-all cursor-pointer"
           >
             <BookPlus className="h-4 w-4" />
             <span>Registrasi Buku Baru</span>
@@ -511,7 +594,7 @@ export default function PendaftaranBukuPage() {
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
               {filteredBooks.length > 0 ? (
-                filteredBooks.map((book) => {
+                pagedBooks.map((book) => {
                   const epcs = book.epcList && book.epcList.length > 0 ? book.epcList : [book.rfidTag];
 
                   return (
@@ -541,17 +624,24 @@ export default function PendaftaranBukuPage() {
 
                       {/* MULTI-EPC TAG BADGES */}
                       <td className="py-3.5 px-4">
-                        <div className="space-y-1">
-                          <span className="inline-flex items-center space-x-1 font-mono text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
-                            <Radio className="h-3 w-3 text-emerald-500 shrink-0" />
-                            <span className="truncate max-w-[130px]">{epcs[0]}</span>
+                        {epcs.length > 0 && epcs[0] && epcs[0] !== "-" && epcs[0] !== "Belum Ada" && !epcs[0].startsWith("UNASSIGNED_") ? (
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center space-x-1 font-mono text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
+                              <Radio className="h-3 w-3 text-emerald-500 shrink-0" />
+                              <span className="truncate max-w-[130px]">{epcs[0]}</span>
+                            </span>
+                            {epcs.length > 1 && (
+                              <div className="text-[10px] font-mono text-slate-400 font-semibold pl-1">
+                                + {epcs.length - 1} tag EPC eksemplar lain
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center space-x-1 text-[11px] font-medium text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-md border border-amber-200" title="Klik tombol Edit untuk menambahkan tag EPC buku">
+                            <AlertCircle className="h-3 w-3 text-amber-500" />
+                            <span>Belum Ada</span>
                           </span>
-                          {epcs.length > 1 && (
-                            <div className="text-[10px] font-mono text-slate-400 font-semibold pl-1">
-                              + {epcs.length - 1} tag EPC eksemplar lain
-                            </div>
-                          )}
-                        </div>
+                        )}
                       </td>
 
                       {/* STOK COLUMN - DISPLAY ONLY */}
@@ -574,14 +664,7 @@ export default function PendaftaranBukuPage() {
                           </button>
                           {/* EDIT */}
                           <button
-                            onClick={() => {
-                              const epcs = book.epcList && book.epcList.length > 0 ? book.epcList : [book.rfidTag];
-                              setEditingBook({
-                                ...book,
-                                stok: book.stok || epcs.length,
-                                epcList: epcs,
-                              });
-                            }}
+                            onClick={() => handleOpenEditBook(book)}
                             aria-label={`Edit ${book.judul}`}
                             className="rounded-lg p-1.5 text-amber-600 hover:bg-amber-50 hover:text-amber-700 transition-colors cursor-pointer"
                             title="Edit Buku"
@@ -610,6 +693,37 @@ export default function PendaftaranBukuPage() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination */}
+        {bookTotalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-slate-100 pt-4 mt-2 px-1">
+            <p className="text-xs text-slate-500">
+              Halaman <span className="font-bold text-slate-700">{bookPage}</span> dari <span className="font-bold text-slate-700">{bookTotalPages}</span> &middot; {filteredBooks.length} judul
+            </p>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setBookPage(1)} disabled={bookPage === 1} className="rounded-lg px-2 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed" title="Halaman pertama">&#171;</button>
+              <button onClick={() => setBookPage((p) => Math.max(1, p - 1))} disabled={bookPage === 1} className="rounded-lg px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed">Prev</button>
+              {Array.from({ length: bookTotalPages }, (_, i) => i + 1)
+                .filter((p) => p === 1 || p === bookTotalPages || Math.abs(p - bookPage) <= 1)
+                .reduce<(number | "...")[]>((acc, p, idx, arr) => {
+                  if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push("...");
+                  acc.push(p);
+                  return acc;
+                }, [])
+                .map((item, i) =>
+                  item === "..." ? (
+                    <span key={`el-${i}`} className="px-2 text-xs text-slate-400">...</span>
+                  ) : (
+                    <button key={item} onClick={() => setBookPage(item as number)}
+                      className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${bookPage === item ? "bg-blue-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100"}`}
+                    >{item}</button>
+                  )
+                )}
+              <button onClick={() => setBookPage((p) => Math.min(bookTotalPages, p + 1))} disabled={bookPage === bookTotalPages} className="rounded-lg px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed">Next</button>
+              <button onClick={() => setBookPage(bookTotalPages)} disabled={bookPage === bookTotalPages} className="rounded-lg px-2 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed" title="Halaman terakhir">&#187;</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* MODAL 1: VIEW BOOK DETAILS */}
@@ -859,21 +973,33 @@ export default function PendaftaranBukuPage() {
 
                 {/* Per-Eksemplar Scanning List */}
                 <div className="space-y-2">
-                  <label className="block font-bold text-slate-700 text-[11px] uppercase tracking-wide">
-                    Scan & Lock Tag EPC Per Eksemplar ({editingBook.stok} Stok):
-                  </label>
+                  <div className="flex items-center justify-between">
+                    <label className="block font-bold text-slate-700 text-[11px] uppercase tracking-wide">
+                      Scan & Lock Tag EPC Per Eksemplar ({editingBook.stok} Stok):
+                    </label>
+                  </div>
+
+                  {uhfToast && (
+                    <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-[11px] font-bold flex items-center space-x-1.5">
+                      <span className="h-2 w-2 rounded-full bg-emerald-600"></span>
+                      <span>{uhfToast}</span>
+                    </div>
+                  )}
 
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                     {Array.from({ length: editingBook.stok }, (_, idx) => {
                       const epcs = editingBook.epcList && editingBook.epcList.length > 0 ? editingBook.epcList : [editingBook.rfidTag];
                       const val = epcs[idx] || "";
                       const isLocked = lockedEpcs[idx];
+                      const isTarget = activeScanIndex === idx;
 
                       return (
                         <div
                           key={idx}
                           className={`flex flex-wrap items-center justify-between p-2.5 rounded-xl border text-xs gap-2 transition-all ${
-                            isLocked
+                            isTarget
+                              ? "bg-amber-50/80 border-amber-300 ring-2 ring-amber-400/30"
+                              : isLocked
                               ? "bg-emerald-50/60 border-emerald-200"
                               : "bg-white border-slate-200 shadow-2xs"
                           }`}
@@ -892,49 +1018,60 @@ export default function PendaftaranBukuPage() {
                                 setEditingBook({ ...editingBook, epcList: next, rfidTag: next[0] });
                                 handleUnlockSingleEpc(idx);
                               }}
-                              placeholder="Scan/Ketik EPC RFID"
+                              placeholder={isTarget ? "Dekatkan Tag UHF ke Reader..." : "Scan/Ketik EPC RFID"}
                               className="flex-1 font-mono font-bold text-emerald-800 bg-slate-50/80 border border-slate-200 rounded-lg px-2.5 py-1 text-[11px] focus:border-blue-500 focus:bg-white focus:outline-none disabled:bg-emerald-100/50 disabled:text-emerald-900"
                             />
                           </div>
 
                           <div className="flex items-center space-x-1.5 shrink-0">
-                            {!isLocked && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                   setScanTarget({ index: idx, mode: "edit" });
-                                   handleUnlockSingleEpc(idx);
-                                }}
-                                className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100 cursor-pointer"
-                              >
-                                Scan Tag
-                              </button>
+                            {isTarget && (
+                              <span className="inline-flex items-center space-x-1 text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-lg border border-amber-300 animate-pulse">
+                                <span>Scan Aktif</span>
+                              </span>
                             )}
-
                             {isLocked ? (
                               <div className="flex items-center space-x-1">
-                                <span className="inline-flex items-center space-x-1 text-[10px] font-extrabold text-emerald-700 bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-300">
+                                <span className="inline-flex items-center space-x-1 text-[10px] font-extrabold text-emerald-700 bg-emerald-100 px-2.5 py-1 rounded-lg border border-emerald-300">
                                   <Lock className="h-3 w-3 text-emerald-600" />
                                   <span>Terkunci</span>
                                 </span>
                                 <button
                                   type="button"
-                                  onClick={() => handleUnlockSingleEpc(idx)}
-                                  className="rounded-lg bg-white border border-slate-200 px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
-                                  title="Buka Kunci untuk Edit"
+                                  onClick={() => {
+                                    handleUnlockSingleEpc(idx);
+                                    setActiveScanIndex(idx);
+                                  }}
+                                  className="inline-flex items-center space-x-1 font-bold text-[11px] text-amber-700 bg-amber-50 hover:bg-amber-100 px-2.5 py-1 rounded-lg border border-amber-200 cursor-pointer"
+                                  title="Buka kunci untuk scan ulang tag UHF"
                                 >
-                                  <Unlock className="h-3 w-3 text-slate-500" />
+                                  <span>Ganti Tag</span>
                                 </button>
                               </div>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleLockSingleEpc(idx, editingBook.id, epcs)}
-                                className="inline-flex items-center space-x-1 font-extrabold text-xs text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1 rounded-lg shadow-2xs cursor-pointer"
-                              >
-                                <Lock className="h-3 w-3 text-white" />
-                                <span>Simpan & Lock</span>
-                              </button>
+                              <div className="flex items-center space-x-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveScanIndex(idx)}
+                                  className={`inline-flex items-center space-x-1 font-bold text-[11px] px-2.5 py-1 rounded-lg border cursor-pointer ${
+                                    isTarget
+                                      ? "bg-amber-600 text-white border-amber-600"
+                                      : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
+                                  }`}
+                                >
+                                  <span>Scan UHF</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleLockSingleEpc(idx, editingBook.id, epcs);
+                                    if (activeScanIndex === idx) setActiveScanIndex(null);
+                                  }}
+                                  className="inline-flex items-center space-x-1 font-extrabold text-xs text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1 rounded-lg shadow-2xs cursor-pointer"
+                                >
+                                  <Lock className="h-3 w-3 text-white" />
+                                  <span>Kunci</span>
+                                </button>
+                              </div>
                             )}
                           </div>
                         </div>
@@ -1112,20 +1249,32 @@ export default function PendaftaranBukuPage() {
 
                 {/* Per-Eksemplar Scanning List */}
                 <div className="space-y-2">
-                  <label className="block font-bold text-slate-700 text-[11px] uppercase tracking-wide">
-                    Scan & Lock Tag EPC Per Eksemplar ({stok} Stok):
-                  </label>
+                  <div className="flex items-center justify-between">
+                    <label className="block font-bold text-slate-700 text-[11px] uppercase tracking-wide">
+                      Scan & Lock Tag EPC Per Eksemplar ({stok} Stok):
+                    </label>
+                  </div>
+
+                  {uhfToast && (
+                    <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-[11px] font-bold flex items-center space-x-1.5">
+                      <span className="h-2 w-2 rounded-full bg-emerald-600"></span>
+                      <span>{uhfToast}</span>
+                    </div>
+                  )}
 
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                     {Array.from({ length: stok }, (_, idx) => {
                       const val = epcList[idx] || "";
                       const isLocked = lockedEpcs[idx];
+                      const isTarget = activeScanIndex === idx;
 
                       return (
                         <div
                           key={idx}
                           className={`flex flex-wrap items-center justify-between p-2.5 rounded-xl border text-xs gap-2 transition-all ${
-                            isLocked
+                            isTarget
+                              ? "bg-amber-50/80 border-amber-300 ring-2 ring-amber-400/30"
+                              : isLocked
                               ? "bg-emerald-50/60 border-emerald-200"
                               : "bg-white border-slate-200 shadow-2xs"
                           }`}
@@ -1139,46 +1288,60 @@ export default function PendaftaranBukuPage() {
                               disabled={isLocked}
                               value={val}
                               onChange={(e) => handleUpdateSingleEpc(idx, e.target.value)}
-                              placeholder="Scan/Ketik EPC RFID"
+                              placeholder={isTarget ? "Dekatkan Tag UHF ke Reader..." : "Scan/Ketik EPC RFID"}
                               className="flex-1 font-mono font-bold text-emerald-800 bg-slate-50/80 border border-slate-200 rounded-lg px-2.5 py-1 text-[11px] focus:border-blue-500 focus:bg-white focus:outline-none disabled:bg-emerald-100/50 disabled:text-emerald-900"
                             />
                           </div>
 
                           <div className="flex items-center space-x-1.5 shrink-0">
-                            {!isLocked && (
-                              <button
-                                type="button"
-                                onClick={() => handleScanSingleEpc(idx)}
-                                className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100 cursor-pointer"
-                              >
-                                Scan Tag
-                              </button>
+                            {isTarget && (
+                              <span className="inline-flex items-center space-x-1 text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-lg border border-amber-300 animate-pulse">
+                                <span>Scan Aktif</span>
+                              </span>
                             )}
-
                             {isLocked ? (
                               <div className="flex items-center space-x-1">
-                                <span className="inline-flex items-center space-x-1 text-[10px] font-extrabold text-emerald-700 bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-300">
+                                <span className="inline-flex items-center space-x-1 text-[10px] font-extrabold text-emerald-700 bg-emerald-100 px-2.5 py-1 rounded-lg border border-emerald-300">
                                   <Lock className="h-3 w-3 text-emerald-600" />
                                   <span>Terkunci</span>
                                 </span>
                                 <button
                                   type="button"
-                                  onClick={() => handleUnlockSingleEpc(idx)}
-                                  className="rounded-lg bg-white border border-slate-200 px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
-                                  title="Buka Kunci untuk Edit"
+                                  onClick={() => {
+                                    handleUnlockSingleEpc(idx);
+                                    setActiveScanIndex(idx);
+                                  }}
+                                  className="inline-flex items-center space-x-1 font-bold text-[11px] text-amber-700 bg-amber-50 hover:bg-amber-100 px-2.5 py-1 rounded-lg border border-amber-200 cursor-pointer"
+                                  title="Buka kunci untuk scan ulang tag UHF"
                                 >
-                                  <Unlock className="h-3 w-3 text-slate-500" />
+                                  <span>Ganti Tag</span>
                                 </button>
                               </div>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleLockSingleEpc(idx)}
-                                className="inline-flex items-center space-x-1 font-extrabold text-xs text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1 rounded-lg shadow-2xs cursor-pointer"
-                              >
-                                <Lock className="h-3 w-3 text-white" />
-                                <span>Simpan & Lock</span>
-                              </button>
+                              <div className="flex items-center space-x-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveScanIndex(idx)}
+                                  className={`inline-flex items-center space-x-1 font-bold text-[11px] px-2.5 py-1 rounded-lg border cursor-pointer ${
+                                    isTarget
+                                      ? "bg-amber-600 text-white border-amber-600"
+                                      : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
+                                  }`}
+                                >
+                                  <span>Scan UHF</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleLockSingleEpc(idx);
+                                    if (activeScanIndex === idx) setActiveScanIndex(null);
+                                  }}
+                                  className="inline-flex items-center space-x-1 font-extrabold text-xs text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1 rounded-lg shadow-2xs cursor-pointer"
+                                >
+                                  <Lock className="h-3 w-3 text-white" />
+                                  <span>Kunci</span>
+                                </button>
+                              </div>
                             )}
                           </div>
                         </div>
@@ -1216,6 +1379,44 @@ export default function PendaftaranBukuPage() {
           </div>
         </div>
       )}
+      {/* IMPORT MODAL */}
+      <ImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        title="Impor Data Katalog Buku"
+        entityName="Buku"
+        columns={bookImportColumns}
+        sampleData={bookImportSampleData}
+        onImport={async (rows) => {
+          try {
+            const bookList = rows.map((r) => {
+              const epc = r.rfidTag && r.rfidTag !== "Belum Ada" && r.rfidTag !== "-" ? r.rfidTag : "Belum Ada";
+              const epcArr = epc !== "Belum Ada" ? [epc] : ["Belum Ada"];
+              const stokCount = Math.max(1, parseInt(r.stok || "1", 10) || 1);
+              return {
+                isbn: r.isbn,
+                judul: r.judul,
+                pengarang: r.pengarang || "Anonim",
+                penerbit: r.penerbit || "ITK Press",
+                kategori: r.kategori || "Komputer & Teknologi",
+                lokasiRak: r.lokasiRak || "Rak A-01",
+                rfidTag: epc,
+                epcList: epcArr,
+                status: "Tersedia" as const,
+                stok: stokCount,
+              };
+            });
+            const count = await importBooks(bookList);
+            return { successCount: count, errorCount: 0 };
+          } catch (err) {
+            return {
+              successCount: 0,
+              errorCount: rows.length,
+              errorMessage: err instanceof Error ? err.message : "Gagal mengimpor data buku ke database.",
+            };
+          }
+        }}
+      />
       {/* EXPORT MODAL */}
       {exportModalConfig && (
         <ExportModal
@@ -1226,52 +1427,6 @@ export default function PendaftaranBukuPage() {
           columns={exportModalConfig.columns}
           data={exportModalConfig.data}
         />
-      )}
-
-      {/* ── UHF RFID Scan Overlay ─────────────────────────────────────────── */}
-      {scanTarget !== null && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="relative w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
-            <button
-              type="button"
-              onClick={() => setScanTarget(null)}
-              className="absolute right-4 top-4 rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-            >
-              <X className="h-4 w-4" />
-            </button>
-
-            <div className="flex flex-col items-center space-y-4">
-              {/* Animated radio icon */}
-              <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-emerald-50 border-2 border-emerald-200">
-                <Radio className="h-8 w-8 text-emerald-600 animate-pulse" />
-                <span className="absolute inset-0 rounded-full border-2 border-emerald-300 animate-ping opacity-40" />
-              </div>
-
-              <div className="text-center">
-                <p className="text-sm font-extrabold text-slate-800 uppercase tracking-wide">
-                  Dekatkan Tag RFID Buku
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Eksemplar #{scanTarget.index + 1} — menunggu scan UHF...
-                </p>
-              </div>
-
-              <div className="w-full rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 py-3 px-4 text-center">
-                <p className="text-[11px] font-mono text-emerald-700 font-bold">
-                  ws://localhost:8765 · aktif
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setScanTarget(null)}
-                className="w-full rounded-xl border border-slate-200 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Batal
-              </button>
-            </div>
-          </div>
-        </div>
       )}
     </div>
   );

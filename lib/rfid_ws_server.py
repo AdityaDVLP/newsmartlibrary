@@ -1,3 +1,9 @@
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import asyncio
 import json
 import threading
@@ -5,24 +11,24 @@ import serial
 import serial.tools.list_ports
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────────
+# --- CONFIG --------------------------------------------------------------------
 BAUD_RATE  = 115200
 WS_PORT    = 8765      # WebSocket port
 HTTP_PORT  = 5001      # HTTP polling port (5000 sudah dipakai HF reader)
 
-# ─── SHARED STATE ──────────────────────────────────────────────────────────────
+# --- SHARED STATE --------------------------------------------------------------
 latest_epc = {"epc": None, "rssi": None}
 epc_lock   = threading.Lock()
 reset_last_epc = threading.Event()   # Flag untuk reset dedup di serial thread
 
-# ─── AUTO DETECT SERIAL PORT ──────────────────────────────────────────────────
+# --- AUTO DETECT SERIAL PORT --------------------------------------------------
 def auto_detect_serial_port():
     """
     Scan semua COM port dan cari RFID UHF reader ELC RC04.
 
     Strategi (urutan prioritas):
-    1. Deskripsi chip → pilih port USB-serial yang paling mungkin
-    2. Kirim perintah inventory (0xCF) → validasi respons reader
+    1. Deskripsi chip -> pilih port USB-serial yang paling mungkin
+    2. Kirim perintah inventory (0xCF) -> validasi respons reader
     3. Fallback ke port pertama yang ada
     """
     import time
@@ -35,9 +41,9 @@ def auto_detect_serial_port():
 
     print(f"[SERIAL] Scanning {len(ports)} port(s)...")
     for port_info in ports:
-        print(f"  → {port_info.device}: {port_info.description} [{port_info.hwid}]")
+        print(f"  -> {port_info.device}: {port_info.description} [{port_info.hwid}]")
 
-    # ── Tahap 1: Filter berdasarkan deskripsi chip (cepat) ──────────────────
+    # -- Tahap 1: Filter berdasarkan deskripsi chip (cepat) ------------------
     keywords = ["ch340", "ch341", "cp210", "cp2102", "ftdi", "usb serial", "uart", "rfid"]
     candidate_ports = []
 
@@ -55,7 +61,7 @@ def auto_detect_serial_port():
     if not candidate_ports:
         candidate_ports = [p.device for p in ports]
 
-    # ── Tahap 2: Kirim inventory command, cek respons ────────────────────────
+    # -- Tahap 2: Kirim inventory command, cek respons ------------------------
     # Build inventory frame sementara (INVENTORY_CMD belum dideklarasi)
     def _build_cmd():
         frame = bytes([0xCF, 0x00, 0x00, 0x01, 0x00])
@@ -80,7 +86,7 @@ def auto_detect_serial_port():
                 time.sleep(0.1)
                 data = ser.read(64)
                 if data and b'\xCF' in data:
-                    print(f"[SERIAL] ✓ ELC RC04 merespons di {port}! (attempt {attempt+1})")
+                    print(f"[SERIAL] [OK] ELC RC04 merespons di {port}! (attempt {attempt+1})")
                     found = True
                     break
 
@@ -94,28 +100,28 @@ def auto_detect_serial_port():
             print(f"  [SERIAL] {port} gagal dibuka: {e}")
             continue
 
-    # ── Tahap 3: Fallback — gunakan kandidat pertama tanpa validasi ──────────
+    # -- Tahap 3: Fallback -- gunakan kandidat pertama tanpa validasi ----------
     if candidate_ports:
         port = candidate_ports[0]
-        print(f"[SERIAL] ⚠ Tidak ada respons dari reader.")
-        print(f"[SERIAL] ⚠ Fallback ke {port} — pastikan reader terhubung & driver terinstall.")
+        print(f"[SERIAL] [!] Tidak ada respons dari reader.")
+        print(f"[SERIAL] [!] Fallback ke {port} -- pastikan reader terhubung & driver terinstall.")
         return port
 
     first_port = ports[0].device
-    print(f"[SERIAL] ⚠ Fallback ke port pertama: {first_port}")
+    print(f"[SERIAL] [!] Fallback ke port pertama: {first_port}")
     return first_port
 
-# ─── RSSI PARSER ──────────────────────────────────────────────────────────────
+# --- RSSI PARSER --------------------------------------------------------------
 def parse_rssi(rssi_bytes: bytes) -> float:
     """
     Konversi 2 byte RSSI ke nilai dBm.
     Format : two's complement, big-endian, unit 0.1 dBm
-    Contoh : 0xFE48 → -440 → -44.0 dBm
+    Contoh : 0xFE48 -> -440 -> -44.0 dBm
     """
     raw = int.from_bytes(rssi_bytes, byteorder='big', signed=True)
     return raw / 10.0
 
-# ─── FRAME VALIDATOR (CRC16) ──────────────────────────────────────────────────
+# --- FRAME VALIDATOR (CRC16) --------------------------------------------------
 def calc_crc16(data: bytes) -> tuple:
     """Hitung CRC16 sesuai protokol EL-UHF-RC4."""
     value = 0xFFFF
@@ -132,39 +138,24 @@ def is_valid_frame(frame: bytes) -> bool:
     crc_msb, crc_lsb = calc_crc16(frame[:-2])
     return frame[-2] == crc_msb and frame[-1] == crc_lsb
 
-# ─── INVENTORY COMMAND BUILDER ────────────────────────────────────────────────
+# --- INVENTORY COMMAND BUILDER ------------------------------------------------
 def build_inventory_command() -> bytes:
     """
-    Bangun frame perintah inventory (CMD 0x0001) untuk ELC RC04.
-
-    Format frame request:
-    ┌──────┬──────┬────────┬─────┬────────┐
-    │ HEAD │ ADDR │  CMD   │ LEN │ CRC(2) │
-    │  CF  │  00  │ 00 01  │ 00  │  ??    │
-    └──────┴──────┴────────┴─────┴────────┘
-    LEN=0 → tidak ada parameter tambahan
+    Bangun frame perintah inventory ISO Continue (CMD 0x0001) untuk ELC RC04
+    sesuai protokol command.py / reader.py:
+    HEAD (CF) + ADDR (FF/Broadcast) + CMD (00 01) + LEN (05) + DATA (StopType 0x00 + 4-byte value 3) + CRC16
     """
-    frame_without_crc = bytes([0xCF, 0x00, 0x00, 0x01, 0x00])
+    frame_without_crc = bytes([0xCF, 0xFF, 0x00, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x03])
     crc_msb, crc_lsb = calc_crc16(frame_without_crc)
     return frame_without_crc + bytes([crc_msb, crc_lsb])
 
 INVENTORY_CMD = build_inventory_command()
 
-# ─── SERIAL READER (background thread) ────────────────────────────────────────
+# --- SERIAL READER (background thread) ----------------------------------------
 def serial_reader_thread(on_epc_callback, serial_port):
     """
     Kirim perintah inventory ke ELC RC04 secara terus-menerus dan baca
-    respons EPC.
-
-    Reader UHF tidak broadcast otomatis — harus di-poll dengan mengirim
-    perintah inventory (CMD 0x0001) setiap siklus.
-
-    Format frame response inventory (CMD 0x0001):
-    ┌──────┬──────┬────────┬─────┬────────┬─────────┬─────────┬─────────┬────────────┬────────────┬────────┐
-    │ HEAD │ ADDR │  CMD   │ LEN │ STATUS │ RSSI(2) │ ANT.(1) │  CH.(1) │TagInfoLen  │  TagInfo   │ CRC(2) │
-    │  CF  │  00  │ 00 01  │  N  │   00   │ FE 48   │   01    │   00    │    0C      │  EPC...    │  ??    │
-    └──────┴──────┴────────┴─────┴────────┴─────────┴─────────┴─────────┴────────────┴────────────┴────────┘
-    Offset:  0      1        2-3    4        5         6-7       8         9            10           11+N
+    respons EPC, dengan dukungan parsing frame lengkap maupun pattern fallback (e2).
     """
     import time
 
@@ -175,13 +166,21 @@ def serial_reader_thread(on_epc_callback, serial_port):
         print("[SERIAL] ERROR: Tidak ada serial port yang terdeteksi!")
         return
 
-    try:
-        ser = serial.Serial(serial_port, BAUD_RATE, timeout=0.3)
-        print(f"[SERIAL] Connected to {serial_port} @ {BAUD_RATE}")
-        print(f"[SERIAL] Mengirim perintah inventory ELC RC04 secara terus-menerus...")
-    except Exception as e:
-        print(f"[SERIAL] ERROR: {e}")
+    # Coba sambungkan serial port
+    ser = None
+    for baud in [BAUD_RATE, 57600]:
+        try:
+            ser = serial.Serial(serial_port, baud, timeout=0.3)
+            print(f"[SERIAL] Connected to {serial_port} @ {baud}")
+            break
+        except Exception:
+            ser = None
+
+    if not ser:
+        print(f"[SERIAL] ERROR: Gagal membuka {serial_port}")
         return
+
+    print(f"[SERIAL] Polling reader UHF ELC RC04 aktif...")
 
     while True:
         try:
@@ -190,17 +189,35 @@ def serial_reader_thread(on_epc_callback, serial_port):
                 last = None
                 buffer.clear()
                 reset_last_epc.clear()
-                print("[SERIAL] Dedup reset → ready to re-read same tag")
+                print("[SERIAL] Dedup reset -> ready to re-read same tag")
 
-            # ── Kirim perintah inventory ke reader ─────────────────────────
-            ser.write(INVENTORY_CMD)
+            # -- Kirim perintah inventory ke reader -------------------------
+            try:
+                ser.write(INVENTORY_CMD)
+            except Exception:
+                pass
 
-            # Baca respons (tunggu maks 300ms sesuai timeout serial)
+            # Baca respons
             data = ser.read(128)
             if data:
                 buffer.extend(data)
 
-            # ── Parse frame ────────────────────────────────────────────────
+                # -- Fallback pattern matcher (seperti di auto_reader.py) ----
+                # Jika ada raw EPC (biasanya dimulai dengan prefix 'e2' 24 hex char)
+                raw_hex = data.hex().lower()
+                if "e2" in raw_hex:
+                    start_idx = raw_hex.find("e2")
+                    candidate_epc = raw_hex[start_idx:start_idx + 24].upper()
+                    if len(candidate_epc) == 24 and candidate_epc != last:
+                        last = candidate_epc
+                        rssi_dbm = -50.0  # default estimasi RSSI jika raw stream
+                        print(f"[RFID] (Raw Stream) EPC: {candidate_epc}")
+                        with epc_lock:
+                            latest_epc["epc"]  = candidate_epc
+                            latest_epc["rssi"] = rssi_dbm
+                        on_epc_callback(candidate_epc, rssi_dbm)
+
+            # -- Parse frame terstruktur ------------------------------------
             while len(buffer) >= 7:
 
                 # Cari HEAD byte 0xCF
@@ -213,7 +230,7 @@ def serial_reader_thread(on_epc_callback, serial_port):
                     break
 
                 cmd    = (buffer[2] << 8) | buffer[3]   # 2 byte CMD
-                length = buffer[4]                        # LEN field
+                length = buffer[4]                      # LEN field
 
                 # Total ukuran frame: HEAD(1)+ADDR(1)+CMD(2)+LEN(1)+Param(length)+CRC(2)
                 frame_size = 7 + length
@@ -224,24 +241,15 @@ def serial_reader_thread(on_epc_callback, serial_port):
 
                 # Validasi CRC
                 if not is_valid_frame(frame):
-                    # CRC gagal → buang 1 byte dan coba lagi
                     buffer.pop(0)
                     continue
 
-                # ── Hanya proses CMD 0x0001 (inventory response) ──────────
+                # -- Hanya proses CMD 0x0001 (inventory response) ----------
                 if cmd == 0x0001:
                     status = frame[5]
 
                     if status == 0x00 and length >= 6:
-                        # Offset setelah STATUS (index 5):
-                        # [6..7]  = RSSI (2 byte)
-                        # [8]     = Antenna
-                        # [9]     = Channel
-                        # [10]    = TagInfoLen
-                        # [11..N] = TagInfo (EPC)
                         rssi_bytes   = frame[6:8]
-                        # antenna    = frame[8]
-                        # channel    = frame[9]
                         tag_info_len = frame[10]
 
                         if len(frame) >= 11 + tag_info_len:
@@ -260,22 +268,19 @@ def serial_reader_thread(on_epc_callback, serial_port):
                                 on_epc_callback(epc, rssi_dbm)
 
                     elif status == 0x12:
-                        pass   # No tag found – normal, abaikan
-                    else:
-                        print(f"[SERIAL] Status non-OK: 0x{status:02X}")
+                        pass   # No tag found - normal, abaikan
 
                 # Buang frame yang sudah diproses
                 buffer = buffer[frame_size:]
 
-            # Jeda singkat sebelum inventory berikutnya
             time.sleep(0.05)
 
         except Exception as e:
             print(f"[SERIAL] Read error: {e}")
             buffer.clear()
-            time.sleep(1)   # Jeda sebelum retry agar tidak flood error log
+            time.sleep(0.5)
 
-# ─── WEBSOCKET SERVER (asyncio) ───────────────────────────────────────────────
+# --- WEBSOCKET SERVER (asyncio) -----------------------------------------------
 connected_clients = set()
 scanning_clients  = set()   # Hanya client yang aktif scan (modal terbuka)
 loop = None
@@ -292,7 +297,7 @@ async def ws_handler(websocket):
 
             if msg == "start_scan":
                 scanning_clients.add(websocket)
-                print(f"[WS] Client {remote} → START SCAN (modal opened)")
+                print(f"[WS] Client {remote} -> START SCAN (modal opened)")
 
                 with epc_lock:
                     latest_epc["epc"]  = None
@@ -310,7 +315,7 @@ async def ws_handler(websocket):
 
             elif msg == "stop_scan":
                 scanning_clients.discard(websocket)
-                print(f"[WS] Client {remote} → STOP SCAN (modal closed)")
+                print(f"[WS] Client {remote} -> STOP SCAN (modal closed)")
 
                 with epc_lock:
                     latest_epc["epc"]  = None
@@ -330,8 +335,9 @@ async def ws_handler(websocket):
         print(f"[WS] Client disconnected: {remote}")
 
 async def broadcast_epc(epc: str, rssi: float = None):
-    """Kirim EPC + RSSI HANYA ke client yang sedang scanning (modal terbuka)."""
-    if not scanning_clients:
+    """Kirim EPC + RSSI ke client scanning maupun connected."""
+    target_clients = scanning_clients if scanning_clients else connected_clients
+    if not target_clients:
         return
 
     message = json.dumps({
@@ -342,18 +348,18 @@ async def broadcast_epc(epc: str, rssi: float = None):
 
     tasks = [
         asyncio.create_task(client.send(message))
-        for client in scanning_clients.copy()
+        for client in target_clients.copy()
     ]
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-        print(f"[WS] EPC {epc} | RSSI {rssi:.1f} dBm → {len(tasks)} scanning client(s)")
+        print(f"[WS] EPC {epc} | RSSI {rssi:.1f} dBm -> {len(tasks)} client(s)")
 
 def on_epc_from_serial(epc: str, rssi: float = None):
-    """Callback dari serial thread → schedule broadcast ke asyncio event loop."""
+    """Callback dari serial thread -> schedule broadcast ke asyncio event loop."""
     if loop and loop.is_running():
         asyncio.run_coroutine_threadsafe(broadcast_epc(epc, rssi), loop)
 
-# ─── HTTP SERVER (polling fallback) ───────────────────────────────────────────
+# --- HTTP SERVER (polling fallback) -------------------------------------------
 class RFIDHTTPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
@@ -414,7 +420,7 @@ def start_http_server():
     print(f"[HTTP] Polling server on http://localhost:{HTTP_PORT}")
     server.serve_forever()
 
-# ─── MAIN ──────────────────────────────────────────────────────────────────────
+# --- MAIN ----------------------------------------------------------------------
 async def main():
     global loop
     loop = asyncio.get_event_loop()
@@ -425,7 +431,7 @@ async def main():
 
     if not detected_port:
         print("=" * 55)
-        print("  ⚠ PERINGATAN: Tidak ada serial port terdeteksi!")
+        print("  [!] PERINGATAN: Tidak ada serial port terdeteksi!")
         print("  Server tetap berjalan (WebSocket + HTTP)")
         print("  Sambungkan ELC RC04 lalu restart server.")
         print("=" * 55)
@@ -463,7 +469,7 @@ async def main():
     # Banner
     print()
     print("=" * 55)
-    print("  ELC RC04 RFID UHF Server — with RSSI Support")
+    print("  ELC RC04 RFID UHF Server -- with RSSI Support")
     print("=" * 55)
     print(f"  WebSocket : ws://localhost:{WS_PORT}")
     print(f"  HTTP Poll : http://localhost:{HTTP_PORT}/api/rfid/get-epc")
@@ -471,10 +477,10 @@ async def main():
     print(f"  Serial    : {detected_port or 'NOT DETECTED'} @ {BAUD_RATE}")
     print()
     print("  WebSocket messages:")
-    print("    → send  : 'start_scan'  (modal dibuka)")
-    print("    → send  : 'stop_scan'   (modal ditutup)")
-    print("    → send  : 'reset'       (clear EPC)")
-    print("    ← recv  : {type, epc, rssi}  (saat tag terbaca)")
+    print("    -> send  : 'start_scan'  (modal dibuka)")
+    print("    -> send  : 'stop_scan'   (modal ditutup)")
+    print("    -> send  : 'reset'       (clear EPC)")
+    print("    <- recv  : {type, epc, rssi}  (saat tag terbaca)")
     print()
     print("  RSSI: nilai dBm (mis. -44.0), makin kecil = makin jauh")
     print()

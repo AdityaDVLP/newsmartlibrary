@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type UhfReaderStatus = {
@@ -63,6 +63,10 @@ export type UseUhfScannerOptions = {
 export function useUhfScanner({ onEpc, enabled }: UseUhfScannerOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const isConnectedRef = useRef(false);
+  const [isConnected, setIsConnected] = useState(false);
+  // Simpan onEpc di ref agar WebSocket tidak reconnect setiap render
+  const onEpcRef = useRef(onEpc);
+  useEffect(() => { onEpcRef.current = onEpc; }, [onEpc]);
 
   const startScan = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -96,47 +100,82 @@ export function useUhfScanner({ onEpc, enabled }: UseUhfScannerOptions) {
       return;
     }
 
-    // Buka koneksi WebSocket
-    const ws = new WebSocket(UHF_WS_URL);
-    wsRef.current = ws;
+    let isMounted = true;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
-    ws.onopen = () => {
-      isConnectedRef.current = true;
-      console.log("[UHF-WS] Connected to", UHF_WS_URL);
-      ws.send("start_scan");
-    };
+    const connect = () => {
+      if (!isMounted || !enabled) return;
 
-    ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data as string) as UhfWsMessage;
-        if (msg.type === "epc") {
-          console.log(`[UHF-WS] EPC: ${msg.epc} | RSSI: ${msg.rssi} dBm`);
-          onEpc(msg.epc, msg.rssi);
-        }
+        const ws = new WebSocket(UHF_WS_URL);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (!isMounted) {
+            ws.close();
+            return;
+          }
+          isConnectedRef.current = true;
+          setIsConnected(true);
+          console.log("[UHF-WS] Terhubung ke", UHF_WS_URL);
+          ws.send("start_scan");
+        };
+
+        ws.onmessage = (event) => {
+          if (!isMounted) return;
+          try {
+            const msg = JSON.parse(event.data as string) as UhfWsMessage;
+            if (msg.type === "epc") {
+              // Panggil via ref agar selalu dapat callback terbaru
+              onEpcRef.current(msg.epc, msg.rssi);
+            }
+          } catch {
+            // abaikan pesan non-JSON
+          }
+        };
+
+        ws.onerror = () => {
+          // Tidak menggunakan console.error agar Next.js dev overlay tidak memunculkan popup error saat server belum dinyalakan
+          isConnectedRef.current = false;
+          setIsConnected(false);
+        };
+
+        ws.onclose = () => {
+          isConnectedRef.current = false;
+          setIsConnected(false);
+          wsRef.current = null;
+          // Auto-reconnect jika scanner masih diaktifkan
+          if (isMounted && enabled) {
+            reconnectTimeout = setTimeout(connect, 3000);
+          }
+        };
       } catch {
-        // abaikan pesan non-JSON
+        isConnectedRef.current = false;
+        if (isMounted && enabled) {
+          reconnectTimeout = setTimeout(connect, 3000);
+        }
       }
     };
 
-    ws.onerror = (err) => {
-      console.error("[UHF-WS] Error:", err);
-    };
-
-    ws.onclose = () => {
-      isConnectedRef.current = false;
-      console.log("[UHF-WS] Disconnected");
-    };
+    connect();
 
     return () => {
-      // Hanya kirim stop_scan jika koneksi sudah OPEN (bukan CONNECTING)
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send("stop_scan");
+      isMounted = false;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
       }
-      ws.close();
-      wsRef.current = null;
+      if (wsRef.current) {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send("stop_scan");
+        }
+        wsRef.current.close();
+        wsRef.current = null;
+      }
       isConnectedRef.current = false;
+      setIsConnected(false);
     };
-  }, [enabled, onEpc]);
+  // Hanya re-run saat enabled berubah — onEpc diakses via ref
+  }, [enabled]);
 
-  return { startScan, stopScan, resetEpc };
+  return { isConnected, startScan, stopScan, resetEpc };
 }

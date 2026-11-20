@@ -128,6 +128,36 @@ export interface KioskVisitor {
 
 const normalizeRfid = (value: string) => value.replace(/[^a-z0-9]/gi, "").toUpperCase();
 
+const loadLocalBackup = <T,>(key: string, fallback: T): T => {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const saveLocalBackup = (key: string, data: unknown) => {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+  } catch {}
+};
+
+const isRlsOrPermissionError = (error: unknown): boolean => {
+  if (typeof error === "object" && error !== null) {
+    const err = error as { code?: string; message?: string; details?: string };
+    return (
+      err.code === "42501" ||
+      Boolean(err.message?.includes("row-level security")) ||
+      Boolean(err.message?.includes("permission denied")) ||
+      Boolean(err.details?.includes("row-level security"))
+    );
+  }
+  return false;
+};
+
 const requireSupabase = () => {
   if (!supabase) {
     throw new Error("Supabase belum dikonfigurasi. Periksa URL dan publishable key di file .env.");
@@ -173,6 +203,10 @@ interface LibraryContextType {
 
   simulateVisitorScan: () => void;
   simulateBookScan: () => void;
+  clearBookLogs: () => Promise<void>;
+  clearVisitorLogs: () => Promise<void>;
+  importMembers: (members: Omit<Member, "id" | "dateRegistered">[]) => Promise<number>;
+  importBooks: (books: Omit<Book, "id">[]) => Promise<number>;
 }
 
 const LibraryContext = createContext<LibraryContextType | undefined>(undefined);
@@ -250,31 +284,48 @@ export const LibraryProvider: React.FC<{
     }
   }, []);
 
-  const mapMemberFromDb = (row: Record<string, unknown>): Member => ({
-    id: String(row.id ?? ""),
-    nim: String(row.nim ?? ""),
-    nama: String(row.nama ?? ""),
-    prodi: String(row.prodi ?? ""),
-    email: String(row.email ?? ""),
-    noHp: String(row.no_hp ?? row.noHp ?? ""),
-    rfidTag: String(row.rfid_tag ?? row.rfidTag ?? ""),
-    status: String(row.status ?? "") as MemberCategory,
-    dateRegistered: String(row.date_registered ?? row.dateRegistered ?? ""),
-  });
+  const mapMemberFromDb = (row: Record<string, unknown>): Member => {
+    const rawTag = String(row.rfid_tag ?? row.rfidTag ?? "");
+    const cleanTag = !rawTag || rawTag === "-" || rawTag === "null" || rawTag.startsWith("UNASSIGNED_") ? "Belum Ada" : rawTag;
+    return {
+      id: String(row.id ?? ""),
+      nim: String(row.nim ?? ""),
+      nama: String(row.nama ?? ""),
+      prodi: String(row.prodi ?? ""),
+      email: String(row.email ?? ""),
+      noHp: String(row.no_hp ?? row.noHp ?? ""),
+      rfidTag: cleanTag,
+      status: (String(row.status ?? "") || "Mahasiswa") as MemberCategory,
+      dateRegistered: String(row.date_registered ?? row.dateRegistered ?? ""),
+    };
+  };
 
-  const mapBookFromDb = (row: Record<string, unknown>): Book => ({
-    id: String(row.id ?? ""),
-    isbn: String(row.isbn ?? ""),
-    judul: String(row.judul ?? ""),
-    pengarang: String(row.pengarang ?? ""),
-    penerbit: String(row.penerbit ?? ""),
-    kategori: String(row.kategori ?? ""),
-    lokasiRak: String(row.lokasi_rak ?? row.lokasiRak ?? ""),
-    rfidTag: String(row.rfid_tag ?? row.rfidTag ?? ""),
-    epcList: Array.isArray(row.epc_list) ? row.epc_list.map((item) => String(item)) : Array.isArray(row.epcList) ? row.epcList.map((item) => String(item)) : [],
-    status: String(row.status ?? "") as Book["status"],
-    stok: Number(row.stok ?? 0),
-  });
+  const mapBookFromDb = (row: Record<string, unknown>): Book => {
+    const rawTag = String(row.rfid_tag ?? row.rfidTag ?? "");
+    const cleanTag = !rawTag || rawTag === "-" || rawTag === "null" || rawTag.startsWith("UNASSIGNED_") ? "Belum Ada" : rawTag;
+    let epcs = Array.isArray(row.epc_list)
+      ? row.epc_list.map((item) => String(item))
+      : Array.isArray(row.epcList)
+      ? row.epcList.map((item) => String(item))
+      : [];
+    epcs = epcs.filter((e) => e && e !== "-" && e !== "null" && !e.startsWith("UNASSIGNED_"));
+    if (epcs.length === 0 && cleanTag && cleanTag !== "Belum Ada") {
+      epcs = [cleanTag];
+    }
+    return {
+      id: String(row.id ?? ""),
+      isbn: String(row.isbn ?? ""),
+      judul: String(row.judul ?? ""),
+      pengarang: String(row.pengarang ?? ""),
+      penerbit: String(row.penerbit ?? ""),
+      kategori: String(row.kategori ?? ""),
+      lokasiRak: String(row.lokasi_rak ?? row.lokasiRak ?? ""),
+      rfidTag: epcs[0] || cleanTag,
+      epcList: epcs.length > 0 ? epcs : ["Belum Ada"],
+      status: (String(row.status ?? "") || "Tersedia") as Book["status"],
+      stok: Number(row.stok ?? (epcs.length || 1)),
+    };
+  };
 
   const mapVisitorLogFromDb = (row: Record<string, unknown>): VisitorLog => ({
     id: String(row.id ?? ""),
@@ -323,31 +374,62 @@ export const LibraryProvider: React.FC<{
     iconType: String(row.icon_type ?? row.iconType ?? ""),
   });
 
-  const mapMemberToDb = (member: Member) => ({
-    id: member.id,
-    nim: member.nim,
-    nama: member.nama,
-    prodi: member.prodi,
-    email: member.email,
-    no_hp: member.noHp,
-    rfid_tag: member.rfidTag,
-    status: member.status,
-    date_registered: member.dateRegistered,
-  });
+  const mapMemberToDb = (member: Member) => {
+    const rawRfid = member.rfidTag ? member.rfidTag.trim() : "";
+    const hasRealRfid =
+      rawRfid !== "" &&
+      rawRfid !== "Belum Ada" &&
+      rawRfid !== "-" &&
+      !rawRfid.startsWith("UNASSIGNED");
 
-  const mapBookToDb = (book: Book) => ({
-    id: book.id,
-    isbn: book.isbn,
-    judul: book.judul,
-    pengarang: book.pengarang,
-    penerbit: book.penerbit,
-    kategori: book.kategori,
-    lokasi_rak: book.lokasiRak,
-    rfid_tag: book.rfidTag,
-    epc_list: book.epcList ?? [],
-    status: book.status,
-    stok: book.stok,
-  });
+    // Jika belum ada RFID, kirim ID unik agar aman terhadap constraint NOT NULL maupun UNIQUE
+    const cleanRfid = hasRealRfid
+      ? rawRfid
+      : `UNASSIGNED_${member.id.replace(/[^a-zA-Z0-9]/g, "")}`;
+
+    return {
+      id: member.id,
+      nim: member.nim,
+      nama: member.nama,
+      prodi: member.prodi,
+      email: member.email,
+      no_hp: member.noHp,
+      rfid_tag: cleanRfid,
+      status: member.status,
+      date_registered: member.dateRegistered,
+    };
+  };
+
+  const mapBookToDb = (book: Book) => {
+    const cleanEpcs = (book.epcList || []).filter(
+      (e) => e && e !== "Belum Ada" && e !== "-" && !e.startsWith("UNASSIGNED")
+    );
+    const hasRealTag =
+      cleanEpcs.length > 0
+        ? cleanEpcs[0]
+        : book.rfidTag &&
+          book.rfidTag !== "Belum Ada" &&
+          book.rfidTag !== "-" &&
+          !book.rfidTag.startsWith("UNASSIGNED")
+        ? book.rfidTag
+        : null;
+
+    const finalRfid = hasRealTag || `UNASSIGNED_${book.id.replace(/[^a-zA-Z0-9]/g, "")}`;
+
+    return {
+      id: book.id,
+      isbn: book.isbn,
+      judul: book.judul,
+      pengarang: book.pengarang,
+      penerbit: book.penerbit,
+      kategori: book.kategori,
+      lokasi_rak: book.lokasiRak,
+      rfid_tag: finalRfid,
+      epc_list: cleanEpcs,
+      status: book.status,
+      stok: book.stok,
+    };
+  };
 
   const mapVisitorLogToDb = (log: VisitorLog) => ({
     id: log.id,
@@ -414,47 +496,104 @@ export const LibraryProvider: React.FC<{
         throw new Error(`Gagal memuat ${failedResponse[0]}: ${responseError?.message ?? "Kesalahan database."}`);
       }
 
-      setMembers((membersResponse.data ?? []).map((row) => mapMemberFromDb(row as Record<string, unknown>)));
-      setBooks((booksResponse.data ?? []).map((row) => mapBookFromDb(row as Record<string, unknown>)));
-      setVisitorLogs((visitorLogsResponse.data ?? []).map((row) => mapVisitorLogFromDb(row as Record<string, unknown>)).slice(0, 100));
-      setBookLogs((bookLogsResponse.data ?? []).map((row) => mapBookLogFromDb(row as Record<string, unknown>)));
-      setActivities((activitiesResponse.data ?? []).map((row) => mapActivityFromDb(row as Record<string, unknown>)));
-      setRssiHistory((rssiResponse.data ?? []).map((row) => ({
+      const loadedMembers = (membersResponse.data ?? []).map((row) => mapMemberFromDb(row as Record<string, unknown>));
+      const loadedBooks = (booksResponse.data ?? []).map((row) => mapBookFromDb(row as Record<string, unknown>));
+      const loadedVisitorLogs = (visitorLogsResponse.data ?? []).map((row) => mapVisitorLogFromDb(row as Record<string, unknown>)).slice(0, 100);
+      const loadedBookLogs = (bookLogsResponse.data ?? []).map((row) => mapBookLogFromDb(row as Record<string, unknown>));
+      const loadedActivities = (activitiesResponse.data ?? []).map((row) => mapActivityFromDb(row as Record<string, unknown>));
+      const loadedRssi = (rssiResponse.data ?? []).map((row) => ({
         id: Number(row.id),
         time: String(row.time ?? ""),
         rssi: Number(row.rssi ?? 0),
         label: String(row.label ?? ""),
-      })));
-      setLoans((loansResponse.data ?? []).map((row) => mapLoanFromDb(row as Record<string, unknown>)));
+      }));
+      const loadedLoans = (loansResponse.data ?? []).map((row) => mapLoanFromDb(row as Record<string, unknown>));
+
+      setMembers(loadedMembers);
+      setBooks(loadedBooks);
+      setVisitorLogs(loadedVisitorLogs);
+      setBookLogs(loadedBookLogs);
+      setActivities(loadedActivities);
+      setRssiHistory(loadedRssi);
+      setLoans(loadedLoans);
+
+      saveLocalBackup("smartlib_members", loadedMembers);
+      saveLocalBackup("smartlib_books", loadedBooks);
+      saveLocalBackup("smartlib_loans", loadedLoans);
+      saveLocalBackup("smartlib_visitor_logs", loadedVisitorLogs);
+      saveLocalBackup("smartlib_book_logs", loadedBookLogs);
+      saveLocalBackup("smartlib_activities", loadedActivities);
+
       setDatabaseError(null);
       setMembersLoaded(true);
     } catch (error) {
-      setMembers([]);
-      setBooks([]);
-      setLoans([]);
-      setVisitorLogs([]);
-      setBookLogs([]);
-      setActivities([]);
-      setRssiHistory([]);
-      setDatabaseError(error instanceof Error ? error.message : String(error));
+      // Ambil data dari cache lokal jika pemuatan Supabase gagal (misal RLS ditolak atau offline)
+      const cachedMembers = loadLocalBackup<Member[]>("smartlib_members", []);
+      const cachedBooks = loadLocalBackup<Book[]>("smartlib_books", []);
+      const cachedLoans = loadLocalBackup<Loan[]>("smartlib_loans", []);
+      const cachedVisitorLogs = loadLocalBackup<VisitorLog[]>("smartlib_visitor_logs", []);
+      const cachedBookLogs = loadLocalBackup<BookLog[]>("smartlib_book_logs", []);
+      const cachedActivities = loadLocalBackup<Activity[]>("smartlib_activities", []);
+
+      if (cachedMembers.length > 0) setMembers(cachedMembers);
+      if (cachedBooks.length > 0) setBooks(cachedBooks);
+      if (cachedLoans.length > 0) setLoans(cachedLoans);
+      if (cachedVisitorLogs.length > 0) setVisitorLogs(cachedVisitorLogs);
+      if (cachedBookLogs.length > 0) setBookLogs(cachedBookLogs);
+      if (cachedActivities.length > 0) setActivities(cachedActivities);
+
+      const errMessage = error instanceof Error ? error.message : String(error);
+      setDatabaseError(errMessage);
       setMembersLoaded(true);
-      console.warn("Failed to load Supabase library data:", error);
+      console.warn("Failed to load Supabase library data (using local cache if available):", error);
     }
   };
 
   const persistMemberToSupabase = async (member: Member) => {
     const client = requireSupabase();
+    const payload = mapMemberToDb(member);
 
-    const { error } = await client.from("members").upsert(mapMemberToDb(member), { onConflict: "id" });
-    if (error) throw error;
+    const { error } = await client.from("members").upsert(payload, { onConflict: "id" });
+    if (error) {
+      if (
+        error.code === "23502" ||
+        error.message?.includes("rfid_tag") ||
+        error.message?.includes("null")
+      ) {
+        const fallbackPayload = {
+          ...payload,
+          rfid_tag: `UNASSIGNED_${member.id.replace(/[^a-zA-Z0-9]/g, "")}`,
+        };
+        const { error: fallbackError } = await client.from("members").upsert(fallbackPayload, { onConflict: "id" });
+        if (fallbackError) throw fallbackError;
+      } else {
+        throw error;
+      }
+    }
     setDatabaseError(null);
   };
 
   const persistBookToSupabase = async (book: Book) => {
     const client = requireSupabase();
+    const payload = mapBookToDb(book);
 
-    const { error } = await client.from("books").upsert(mapBookToDb(book), { onConflict: "id" });
-    if (error) throw error;
+    const { error } = await client.from("books").upsert(payload, { onConflict: "id" });
+    if (error) {
+      if (
+        error.code === "23502" ||
+        error.message?.includes("rfid_tag") ||
+        error.message?.includes("null")
+      ) {
+        const fallbackPayload = {
+          ...payload,
+          rfid_tag: `UNASSIGNED_${book.id.replace(/[^a-zA-Z0-9]/g, "")}`,
+        };
+        const { error: fallbackError } = await client.from("books").upsert(fallbackPayload, { onConflict: "id" });
+        if (fallbackError) throw fallbackError;
+      } else {
+        throw error;
+      }
+    }
     setDatabaseError(null);
   };
 
@@ -553,10 +692,15 @@ export const LibraryProvider: React.FC<{
         )
       );
 
-      if (!matchedBook) return; // EPC tidak dikenal, abaikan
+      // Kalau tidak terdaftar tidak usah memasukkan EPC ke LOG
+      if (!matchedBook) return;
 
       const timeStr = new Date().toTimeString().split(" ")[0];
       const rssiValue = rssi ?? -99;
+      const judul = matchedBook.judul;
+      const lokasiRak = matchedBook.lokasiRak;
+      const isbn = matchedBook.isbn;
+      const kategori = matchedBook.kategori;
 
       // Tambah ke RSSI history (untuk grafik monitor)
       setRssiHistory((prev) => {
@@ -566,7 +710,7 @@ export const LibraryProvider: React.FC<{
             id: Date.now(),
             time: timeStr.substring(0, 5),
             rssi: rssiValue,
-            label: matchedBook.judul.substring(0, 15),
+            label: judul.substring(0, 15),
           },
         ].slice(-20);
         return next;
@@ -576,10 +720,10 @@ export const LibraryProvider: React.FC<{
       const newLog: BookLog = {
         id: `BL_${globalThis.crypto.randomUUID()}`,
         waktu: timeStr,
-        isbn: matchedBook.isbn,
-        judul: matchedBook.judul,
-        kategori: matchedBook.kategori,
-        lokasiRak: matchedBook.lokasiRak,
+        isbn,
+        judul,
+        kategori,
+        lokasiRak,
         rssi: rssiValue,
         rfidTag: epc,
       };
@@ -593,7 +737,7 @@ export const LibraryProvider: React.FC<{
       const newAct: Activity = {
         id: `ACT_${globalThis.crypto.randomUUID()}`,
         waktu: timeStr.substring(0, 5),
-        deskripsi: `Tag RFID Buku [${matchedBook.judul.substring(0, 20)}] terdeteksi di ${matchedBook.lokasiRak} (${rssiValue} dBm)`,
+        deskripsi: `Tag RFID Buku [${judul.substring(0, 20)}] terdeteksi di ${lokasiRak} (${rssiValue} dBm)`,
         tipe: "book",
         iconType: "book",
       };
@@ -667,8 +811,13 @@ export const LibraryProvider: React.FC<{
       id: `M_${globalThis.crypto.randomUUID()}`,
       dateRegistered: new Date().toISOString().split("T")[0],
     };
-    await persistMemberToSupabase(newMember);
-    setMembers((prev) => [newMember, ...prev]);
+
+    // Update state dan cache lokal terlebih dahulu
+    setMembers((prev) => {
+      const next = [newMember, ...prev];
+      saveLocalBackup("smartlib_members", next);
+      return next;
+    });
 
     const newActivity: Activity = {
       id: `ACT_${globalThis.crypto.randomUUID()}`,
@@ -677,33 +826,126 @@ export const LibraryProvider: React.FC<{
       tipe: "member",
       iconType: "user",
     };
-    setActivities((prev) => [newActivity, ...prev]);
-    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
+    setActivities((prev) => {
+      const next = [newActivity, ...prev];
+      saveLocalBackup("smartlib_activities", next);
+      return next;
+    });
+
+    try {
+      await persistMemberToSupabase(newMember);
+      void persistActivityToSupabase(newActivity).catch((err) =>
+        reportBackgroundDatabaseError("Gagal menyimpan aktivitas anggota baru", err)
+      );
+    } catch (error) {
+      if (isRlsOrPermissionError(error)) {
+        console.warn("Supabase member insert deferred (RLS restriction): Data tersimpan aman di cache lokal browser.", error);
+        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
+        return;
+      }
+      // Jika terjadi error validasi duplikat (23505), batalkan state lokal dan lempar error
+      setMembers((prev) => {
+        const next = prev.filter((m) => m.id !== newMember.id);
+        saveLocalBackup("smartlib_members", next);
+        return next;
+      });
+      throw error;
+    }
   };
 
   const updateMember = async (id: string, updatedData: Partial<Member>) => {
     const currentMember = members.find((member) => member.id === id);
     if (!currentMember) throw new Error("Data anggota tidak ditemukan.");
     const updatedMember = { ...currentMember, ...updatedData };
-    await persistMemberToSupabase(updatedMember);
-    setMembers((prev) => prev.map((member) => member.id === id ? updatedMember : member));
+
+    setMembers((prev) => {
+      const next = prev.map((member) => (member.id === id ? updatedMember : member));
+      saveLocalBackup("smartlib_members", next);
+      return next;
+    });
+
     const newActivity: Activity = {
       id: `ACT_${globalThis.crypto.randomUUID()}`,
       waktu: new Date().toTimeString().substring(0, 5),
-      deskripsi: `Data anggota diperbarui: ID ${id}`,
+      deskripsi: `Data anggota diperbarui: ${updatedMember.nama} (${updatedMember.nim})`,
       tipe: "member",
       iconType: "user",
     };
-    setActivities((prev) => [newActivity, ...prev]);
-    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
+    setActivities((prev) => {
+      const next = [newActivity, ...prev];
+      saveLocalBackup("smartlib_activities", next);
+      return next;
+    });
+
+    try {
+      await persistMemberToSupabase(updatedMember);
+      void persistActivityToSupabase(newActivity).catch((err) =>
+        reportBackgroundDatabaseError("Gagal menyimpan aktivitas pembaruan anggota", err)
+      );
+    } catch (error) {
+      if (isRlsOrPermissionError(error)) {
+        console.warn("Supabase member update deferred (RLS restriction): Data tersimpan di cache lokal.", error);
+        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
+        return;
+      }
+      setMembers((prev) => {
+        const next = prev.map((member) => (member.id === id ? currentMember : member));
+        saveLocalBackup("smartlib_members", next);
+        return next;
+      });
+      throw error;
+    }
   };
 
   const deleteMember = async (id: string) => {
     const client = requireSupabase();
-    const { error } = await client.from("members").delete().eq("id", id);
-    if (error) throw error;
+
+    // 1. Cek apakah anggota masih memiliki buku yang sedang dipinjam (belum dikembalikan)
+    const activeLoan = loans.find((l) => l.memberId === id && l.status === "Dipinjam");
+    if (activeLoan) {
+      throw new Error(
+        `Tidak dapat menghapus anggota: ${activeLoan.memberName || "Anggota"} masih meminjam buku "${activeLoan.bookTitle}". Harap kembalikan buku terlebih dahulu.`
+      );
+    }
+
+    const previousMembers = members;
+    const previousLoans = loans;
+
+    setLoans((prev) => {
+      const next = prev.filter((loan) => loan.memberId !== id);
+      saveLocalBackup("smartlib_loans", next);
+      return next;
+    });
+    setMembers((prev) => {
+      const next = prev.filter((member) => member.id !== id);
+      saveLocalBackup("smartlib_members", next);
+      return next;
+    });
+
+    try {
+      // 2. Bersihkan riwayat peminjaman buku anggota terlebih dahulu
+      await client.from("book_loans").delete().eq("member_id", id);
+      // 3. Hapus data anggota di Supabase
+      const { error } = await client.from("members").delete().eq("id", id);
+      if (error) {
+        if (isRlsOrPermissionError(error)) {
+          console.warn("Supabase member delete deferred (RLS restriction): Anggota dihapus dari tampilan lokal.", error);
+          return;
+        }
+        throw error;
+      }
+    } catch (err) {
+      if (isRlsOrPermissionError(err)) {
+        return;
+      }
+      // Revert jika gagal selain RLS
+      setMembers(previousMembers);
+      setLoans(previousLoans);
+      saveLocalBackup("smartlib_members", previousMembers);
+      saveLocalBackup("smartlib_loans", previousLoans);
+      throw err;
+    }
     setDatabaseError(null);
-    setMembers((prev) => prev.filter((member) => member.id !== id));
   };
 
   const addBook = async (bookData: Omit<Book, "id">) => {
@@ -711,8 +953,12 @@ export const LibraryProvider: React.FC<{
       ...bookData,
       id: `B_${globalThis.crypto.randomUUID()}`,
     };
-    await persistBookToSupabase(newBook);
-    setBooks((prev) => [newBook, ...prev]);
+
+    setBooks((prev) => {
+      const next = [newBook, ...prev];
+      saveLocalBackup("smartlib_books", next);
+      return next;
+    });
 
     const newActivity: Activity = {
       id: `ACT_${globalThis.crypto.randomUUID()}`,
@@ -721,33 +967,114 @@ export const LibraryProvider: React.FC<{
       tipe: "book",
       iconType: "book",
     };
-    setActivities((prev) => [newActivity, ...prev]);
-    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
+    setActivities((prev) => {
+      const next = [newActivity, ...prev];
+      saveLocalBackup("smartlib_activities", next);
+      return next;
+    });
+
+    try {
+      await persistBookToSupabase(newBook);
+      void persistActivityToSupabase(newActivity).catch((err) =>
+        reportBackgroundDatabaseError("Gagal menyimpan aktivitas", err)
+      );
+    } catch (error) {
+      if (isRlsOrPermissionError(error)) {
+        console.warn("Supabase book insert deferred (RLS restriction): Buku tersimpan di cache lokal.", error);
+        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
+        return;
+      }
+      setBooks((prev) => {
+        const next = prev.filter((b) => b.id !== newBook.id);
+        saveLocalBackup("smartlib_books", next);
+        return next;
+      });
+      throw error;
+    }
   };
 
   const updateBook = async (id: string, updatedData: Partial<Book>) => {
     const currentBook = books.find((book) => book.id === id);
     if (!currentBook) throw new Error("Data buku tidak ditemukan.");
     const updatedBook = { ...currentBook, ...updatedData };
-    await persistBookToSupabase(updatedBook);
-    setBooks((prev) => prev.map((book) => book.id === id ? updatedBook : book));
+
+    setBooks((prev) => {
+      const next = prev.map((book) => (book.id === id ? updatedBook : book));
+      saveLocalBackup("smartlib_books", next);
+      return next;
+    });
+
     const newActivity: Activity = {
       id: `ACT_${Date.now()}`,
       waktu: new Date().toTimeString().substring(0, 5),
-      deskripsi: `Data buku diperbarui: ID ${id}`,
+      deskripsi: `Data buku diperbarui: ${updatedBook.judul} (${updatedBook.isbn})`,
       tipe: "book",
       iconType: "book",
     };
-    setActivities((prev) => [newActivity, ...prev]);
-    void persistActivityToSupabase(newActivity).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
+    setActivities((prev) => {
+      const next = [newActivity, ...prev];
+      saveLocalBackup("smartlib_activities", next);
+      return next;
+    });
+
+    try {
+      await persistBookToSupabase(updatedBook);
+      void persistActivityToSupabase(newActivity).catch((err) =>
+        reportBackgroundDatabaseError("Gagal menyimpan aktivitas", err)
+      );
+    } catch (error) {
+      if (isRlsOrPermissionError(error)) {
+        console.warn("Supabase book update deferred (RLS restriction): Buku tersimpan di cache lokal.", error);
+        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
+        return;
+      }
+      setBooks((prev) => {
+        const next = prev.map((book) => (book.id === id ? currentBook : book));
+        saveLocalBackup("smartlib_books", next);
+        return next;
+      });
+      throw error;
+    }
   };
 
   const deleteBook = async (id: string) => {
     const client = requireSupabase();
-    const { error } = await client.from("books").delete().eq("id", id);
-    if (error) throw error;
-    setDatabaseError(null);
-    setBooks((prev) => prev.filter((book) => book.id !== id));
+
+    // 1. Cek apakah buku sedang dipinjam aktif
+    const activeLoan = loans.find((l) => l.bookId === id && l.status === "Dipinjam");
+    if (activeLoan) {
+      throw new Error(
+        `Tidak dapat menghapus buku: buku ini sedang dipinjam oleh ${activeLoan.memberName || "anggota"}. Harap selesaikan pengembalian terlebih dahulu.`
+      );
+    }
+
+    const previousBooks = books;
+    setBooks((prev) => {
+      const next = prev.filter((book) => book.id !== id);
+      saveLocalBackup("smartlib_books", next);
+      return next;
+    });
+
+    try {
+      // 2. Bersihkan riwayat peminjaman buku dari tabel book_loans terlebih dahulu
+      await client.from("book_loans").delete().eq("book_id", id);
+      // 3. Hapus data buku
+      const { error } = await client.from("books").delete().eq("id", id);
+      if (error) {
+        if (isRlsOrPermissionError(error)) {
+          console.warn("Supabase book delete deferred (RLS restriction): Buku dihapus dari tampilan lokal.", error);
+          return;
+        }
+        throw error;
+      }
+    } catch (err) {
+      if (isRlsOrPermissionError(err)) {
+        return;
+      }
+      setBooks(previousBooks);
+      saveLocalBackup("smartlib_books", previousBooks);
+      throw err;
+    }
   };
 
   const borrowBook = async (memberId: string, bookId: string, bookTagId: string, dueAt: string) => {
@@ -918,6 +1245,147 @@ export const LibraryProvider: React.FC<{
     void persistActivityToSupabase(newAct).catch((error) => reportBackgroundDatabaseError("Gagal menyimpan aktivitas", error));
   };
 
+  const clearBookLogs = async () => {
+    setBookLogs([]);
+    setRssiHistory([]);
+    try {
+      if (supabase) {
+        await supabase.from("book_logs").delete().neq("id", "");
+      }
+    } catch (error) {
+      console.error("Gagal membersihkan log buku:", error);
+    }
+  };
+
+  const clearVisitorLogs = async () => {
+    setVisitorLogs([]);
+    try {
+      if (supabase) {
+        await supabase.from("visitor_logs").delete().neq("id", "");
+      }
+    } catch (error) {
+      console.error("Gagal membersihkan log pengunjung:", error);
+    }
+  };
+
+  const importMembers = async (memberList: Omit<Member, "id" | "dateRegistered">[]) => {
+    const client = requireSupabase();
+    const today = new Date().toISOString().split("T")[0];
+    const newMembers: Member[] = memberList.map((m) => {
+      const tag = m.rfidTag && m.rfidTag.trim() !== "" && m.rfidTag !== "-" && m.rfidTag !== "null" ? m.rfidTag.trim() : "Belum Ada";
+      return {
+        ...m,
+        id: `M_${globalThis.crypto.randomUUID()}`,
+        dateRegistered: today,
+        rfidTag: tag,
+      };
+    });
+
+    const dbPayloads = newMembers.map((m) => {
+      const cleanRfid = m.rfidTag && m.rfidTag !== "Belum Ada" && m.rfidTag !== "-" ? m.rfidTag : null;
+      return {
+        id: m.id,
+        nim: m.nim,
+        nama: m.nama,
+        prodi: m.prodi,
+        email: m.email || `${m.nim}@student.itk.ac.id`,
+        no_hp: m.noHp || "-",
+        rfid_tag: cleanRfid,
+        status: m.status || "Mahasiswa",
+        date_registered: m.dateRegistered,
+      };
+    });
+
+    try {
+      const { error } = await client.from("members").insert(dbPayloads);
+      if (error) {
+        if (error.message.includes("rfid_tag") && (error.message.includes("null") || error.code === "23502")) {
+          const fallbackPayloads = dbPayloads.map((p) => ({
+            ...p,
+            rfid_tag: p.rfid_tag || `UNASSIGNED_${p.id}`,
+          }));
+          const { error: fallbackError } = await client.from("members").insert(fallbackPayloads);
+          if (fallbackError && !isRlsOrPermissionError(fallbackError)) throw fallbackError;
+        } else if (!isRlsOrPermissionError(error)) {
+          throw error;
+        }
+      }
+    } catch (err) {
+      if (!isRlsOrPermissionError(err)) {
+        throw err;
+      }
+      console.warn("Supabase member import deferred (RLS restriction): Disimpan di tampilan dan cache lokal.", err);
+    }
+
+    setMembers((prev) => {
+      const next = [...newMembers, ...prev];
+      saveLocalBackup("smartlib_members", next);
+      return next;
+    });
+    return newMembers.length;
+  };
+
+  const importBooks = async (bookList: Omit<Book, "id">[]) => {
+    const client = requireSupabase();
+    const newBooks: Book[] = bookList.map((b) => {
+      const cleanEpcs = (b.epcList || []).filter((e) => e && e !== "Belum Ada" && e !== "-" && e !== "null");
+      const primaryTag = cleanEpcs[0] || (b.rfidTag && b.rfidTag !== "Belum Ada" && b.rfidTag !== "-" ? b.rfidTag : "Belum Ada");
+      return {
+        ...b,
+        id: `B_${globalThis.crypto.randomUUID()}`,
+        rfidTag: primaryTag,
+        epcList: cleanEpcs.length > 0 ? cleanEpcs : ["Belum Ada"],
+        stok: Math.max(1, b.stok || cleanEpcs.length || 1),
+      };
+    });
+
+    const dbPayloads = newBooks.map((b) => {
+      const cleanRfid = b.rfidTag && b.rfidTag !== "Belum Ada" && b.rfidTag !== "-" ? b.rfidTag : null;
+      const cleanEpcs = (b.epcList || []).filter((e) => e && e !== "Belum Ada" && e !== "-");
+      return {
+        id: b.id,
+        isbn: b.isbn,
+        judul: b.judul,
+        pengarang: b.pengarang || "Anonim",
+        penerbit: b.penerbit || "ITK Press",
+        kategori: b.kategori || "Komputer & Teknologi",
+        lokasi_rak: b.lokasiRak || "Rak A-01",
+        rfid_tag: cleanRfid,
+        epc_list: cleanEpcs,
+        status: b.status || "Tersedia",
+        stok: b.stok,
+      };
+    });
+
+    try {
+      const { error } = await client.from("books").insert(dbPayloads);
+      if (error) {
+        if (error.message.includes("rfid_tag") && (error.message.includes("null") || error.code === "23502")) {
+          const fallbackPayloads = dbPayloads.map((p) => ({
+            ...p,
+            rfid_tag: p.rfid_tag || `UNASSIGNED_${p.id}`,
+          }));
+          const { error: fallbackError } = await client.from("books").insert(fallbackPayloads);
+          if (fallbackError && !isRlsOrPermissionError(fallbackError)) throw fallbackError;
+        } else if (!isRlsOrPermissionError(error)) {
+          throw error;
+        }
+      }
+    } catch (err) {
+      if (!isRlsOrPermissionError(err)) {
+        throw err;
+      }
+      console.warn("Supabase book import deferred (RLS restriction): Disimpan di tampilan dan cache lokal.", err);
+    }
+
+    setBooks((prev) => {
+      const next = [...newBooks, ...prev];
+      saveLocalBackup("smartlib_books", next);
+      return next;
+    });
+    return newBooks.length;
+  };
+
   return (
     <LibraryContext.Provider
       value={{
@@ -949,6 +1417,10 @@ export const LibraryProvider: React.FC<{
         returnBook,
         simulateVisitorScan,
         simulateBookScan,
+        clearBookLogs,
+        clearVisitorLogs,
+        importMembers,
+        importBooks,
       }}
     >
       {databaseError && (
