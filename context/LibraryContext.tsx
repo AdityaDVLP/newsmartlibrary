@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { getRfidStatus, getRfidUid } from "../lib/rfid";
+import { useUhfScanner } from "../lib/rfid/uhf";
 import { supabase } from "../lib/supabase";
 
 export type MemberCategory = "Mahasiswa" | "Dosen" | "Visitor";
@@ -537,6 +538,77 @@ export const LibraryProvider: React.FC<{
       clearInterval(interval);
     };
   }, [mode, rfidActive]);
+
+  // ── UHF WebSocket: baca EPC buku → otomatis tambah ke LOG BUKU ──────────────
+  const handleUhfEpc = useCallback(
+    (epc: string, rssi: number | null) => {
+      if (mode === "kiosk") return;
+
+      const normalizedEpc = normalizeRfid(epc);
+
+      // Cocokkan EPC dengan buku yang terdaftar
+      const matchedBook = books.find((book) =>
+        [book.rfidTag, ...(book.epcList ?? [])].some(
+          (tag) => normalizeRfid(tag) === normalizedEpc
+        )
+      );
+
+      if (!matchedBook) return; // EPC tidak dikenal, abaikan
+
+      const timeStr = new Date().toTimeString().split(" ")[0];
+      const rssiValue = rssi ?? -99;
+
+      // Tambah ke RSSI history (untuk grafik monitor)
+      setRssiHistory((prev) => {
+        const next = [
+          ...prev,
+          {
+            id: Date.now(),
+            time: timeStr.substring(0, 5),
+            rssi: rssiValue,
+            label: matchedBook.judul.substring(0, 15),
+          },
+        ].slice(-20);
+        return next;
+      });
+
+      // Buat BookLog entry
+      const newLog: BookLog = {
+        id: `BL_${globalThis.crypto.randomUUID()}`,
+        waktu: timeStr,
+        isbn: matchedBook.isbn,
+        judul: matchedBook.judul,
+        kategori: matchedBook.kategori,
+        lokasiRak: matchedBook.lokasiRak,
+        rssi: rssiValue,
+        rfidTag: epc,
+      };
+
+      setBookLogs((prev) => [newLog, ...prev].slice(0, 50));
+      void persistBookLogToSupabase(newLog).catch((error) =>
+        reportBackgroundDatabaseError("Gagal menyimpan log buku UHF", error)
+      );
+
+      // Tambah ke aktivitas
+      const newAct: Activity = {
+        id: `ACT_${globalThis.crypto.randomUUID()}`,
+        waktu: timeStr.substring(0, 5),
+        deskripsi: `Tag RFID Buku [${matchedBook.judul.substring(0, 20)}] terdeteksi di ${matchedBook.lokasiRak} (${rssiValue} dBm)`,
+        tipe: "book",
+        iconType: "book",
+      };
+      setActivities((prev) => [newAct, ...prev].slice(0, 15));
+      void persistActivityToSupabase(newAct).catch((error) =>
+        reportBackgroundDatabaseError("Gagal menyimpan aktivitas UHF", error)
+      );
+    },
+    [books, mode, reportBackgroundDatabaseError]
+  );
+
+  useUhfScanner({
+    enabled: rfidActive && mode !== "kiosk",
+    onEpc: handleUhfEpc,
+  });
 
   useEffect(() => {
     if (mode === "kiosk" || !membersLoaded || pendingVisitorScans.length === 0) return;

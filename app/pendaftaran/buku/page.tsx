@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
 import {
   BookPlus,
   Search,
@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { useLibrary, Book } from "../../../context/LibraryContext";
 import ExportModal, { ExportColumn } from "../../../components/ExportModal";
+import { useUhfScanner } from "../../../lib/rfid/uhf";
 
 export default function PendaftaranBukuPage() {
   const { books, addBook, updateBook, deleteBook } = useLibrary();
@@ -57,6 +58,49 @@ export default function PendaftaranBukuPage() {
   const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [crudError, setCrudError] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // UHF Scan Modal state
+  const [scanTarget, setScanTarget] = useState<{
+    index: number;
+    mode: "add" | "edit";
+  } | null>(null);
+
+  const handleUhfEpc = useCallback(
+    (epc: string) => {
+      if (!scanTarget) return;
+
+      if (scanTarget.mode === "add") {
+        setEpcList((prev) => {
+          const next = [...prev];
+          next[scanTarget.index] = epc;
+          return next;
+        });
+        setLockedEpcs((prev) => {
+          const next = [...prev];
+          next[scanTarget.index] = false;
+          return next;
+        });
+      } else if (scanTarget.mode === "edit" && editingBook) {
+        const epcs =
+          editingBook.epcList && editingBook.epcList.length > 0
+            ? [...editingBook.epcList]
+            : [editingBook.rfidTag];
+        epcs[scanTarget.index] = epc;
+        setEditingBook({ ...editingBook, epcList: epcs, rfidTag: epcs[0] });
+        handleUnlockSingleEpc(scanTarget.index);
+      }
+
+      // Tutup modal scan setelah EPC diterima
+      setScanTarget(null);
+    },
+    [scanTarget, editingBook]
+  );
+
+  useUhfScanner({
+    enabled: scanTarget !== null,
+    onEpc: handleUhfEpc,
+  });
+
 
   // Export Modal State
   const [exportModalConfig, setExportModalConfig] = useState<{
@@ -135,17 +179,8 @@ export default function PendaftaranBukuPage() {
 
   const handleScanSingleEpc = (index: number) => {
     setEpcError(null);
-    const scannedTag = generateRandomEpc();
-    setEpcList((prev) => {
-      const next = [...prev];
-      next[index] = scannedTag;
-      return next;
-    });
-    setLockedEpcs((prev) => {
-      const next = [...prev];
-      next[index] = false;
-      return next;
-    });
+    // Buka WebSocket UHF — tutup otomatis setelah EPC diterima
+    setScanTarget({ index, mode: "add" });
   };
 
   const handleLockSingleEpc = (index: number, currentBookId?: string, listToValidate?: string[]) => {
@@ -867,11 +902,8 @@ export default function PendaftaranBukuPage() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const scanned = generateRandomEpc();
-                                  const next = [...epcs];
-                                  next[idx] = scanned;
-                                  setEditingBook({ ...editingBook, epcList: next, rfidTag: next[0] });
-                                  handleUnlockSingleEpc(idx);
+                                   setScanTarget({ index: idx, mode: "edit" });
+                                   handleUnlockSingleEpc(idx);
                                 }}
                                 className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100 cursor-pointer"
                               >
@@ -1194,6 +1226,52 @@ export default function PendaftaranBukuPage() {
           columns={exportModalConfig.columns}
           data={exportModalConfig.data}
         />
+      )}
+
+      {/* ── UHF RFID Scan Overlay ─────────────────────────────────────────── */}
+      {scanTarget !== null && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
+            <button
+              type="button"
+              onClick={() => setScanTarget(null)}
+              className="absolute right-4 top-4 rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            <div className="flex flex-col items-center space-y-4">
+              {/* Animated radio icon */}
+              <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-emerald-50 border-2 border-emerald-200">
+                <Radio className="h-8 w-8 text-emerald-600 animate-pulse" />
+                <span className="absolute inset-0 rounded-full border-2 border-emerald-300 animate-ping opacity-40" />
+              </div>
+
+              <div className="text-center">
+                <p className="text-sm font-extrabold text-slate-800 uppercase tracking-wide">
+                  Dekatkan Tag RFID Buku
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Eksemplar #{scanTarget.index + 1} — menunggu scan UHF...
+                </p>
+              </div>
+
+              <div className="w-full rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 py-3 px-4 text-center">
+                <p className="text-[11px] font-mono text-emerald-700 font-bold">
+                  ws://localhost:8765 · aktif
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setScanTarget(null)}
+                className="w-full rounded-xl border border-slate-200 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                Batal
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

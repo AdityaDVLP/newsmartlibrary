@@ -15,6 +15,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { useLibrary, type Book, type Loan } from "../../context/LibraryContext";
+import { getUhfEpc, getUhfStatus } from "../../lib/rfid/uhf";
 
 type LoanFilter = "Aktif" | "Terlambat" | "Riwayat";
 
@@ -149,6 +150,7 @@ export default function PeminjamanPage() {
   const [bookSearchOpen, setBookSearchOpen] = useState(false);
   const [scanMessage, setScanMessage] = useState("");
   const [scanResult, setScanResult] = useState<"idle" | "success" | "error">("idle");
+  const [uhfConnectionStatus, setUhfConnectionStatus] = useState<"Menghubungkan..." | "Terhubung" | "Tidak terhubung">("Menghubungkan...");
   const lastProcessedScanVersion = useRef(rfidScanVersion);
   const [dueAtText, setDueAtText] = useState(toDisplayDate(toDateInputValue(defaultDue)));
   const dueAt = parseDisplayDate(dueAtText);
@@ -243,6 +245,64 @@ export default function PeminjamanPage() {
 
     return () => window.clearTimeout(timeoutId);
   }, [activeLoans, books, members, rfidScanVersion, rfidUid]);
+
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+
+    const pollUhfReader = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const status = await getUhfStatus();
+        if (!active) return;
+        setUhfConnectionStatus(status.reader_connected ? "Terhubung" : "Tidak terhubung");
+        if (!status.reader_connected) return;
+
+        const scan = await getUhfEpc();
+        if (!active) return;
+        if (!scan.epc) return;
+        const scannedTag = normalizeRfid(scan.epc);
+        const matchedBook = books.find((book) =>
+          getBookTagIds(book).some((tag) => normalizeRfid(tag) === scannedTag)
+        );
+        if (!matchedBook) {
+          setScanMessage(`EPC ${scan.epc} belum terdaftar pada buku.`);
+          setScanResult("error");
+          return;
+        }
+
+        const matchedTag = getBookTagIds(matchedBook).find((tag) => normalizeRfid(tag) === scannedTag);
+        const tagHasActiveLoan = loans.some((loan) =>
+          loan.status === "Dipinjam" && normalizeRfid(loan.bookTagId ?? "") === scannedTag
+        );
+        if (tagHasActiveLoan || matchedBook.stok < 1 || matchedBook.status === "Dalam Perawatan") {
+          setScanMessage(`EPC ${matchedTag ?? scan.epc} sudah dipinjam atau buku tidak tersedia.`);
+          setScanResult("error");
+          return;
+        }
+
+        setBookId(matchedBook.id);
+        setBookTagId(matchedTag ?? "");
+        setBookQuery(matchedBook.judul);
+        setBookSearchOpen(false);
+        setMemberSearchOpen(false);
+        setScanMessage(`EPC buku "${matchedBook.judul}" berhasil dipindai.`);
+        setScanResult("success");
+      } catch {
+        if (active) setUhfConnectionStatus("Tidak terhubung");
+      } finally {
+        polling = false;
+      }
+    };
+
+    void pollUhfReader();
+    const intervalId = window.setInterval(() => void pollUhfReader(), 500);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [books, loans]);
 
   const visibleLoans = useMemo(() => {
     const filtered = loans.filter((loan) => {
@@ -448,12 +508,13 @@ export default function PeminjamanPage() {
                   <ScanLine className="h-5 w-5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-sm font-bold text-slate-800">Scan Kartu</p>
-                  <p className="mt-0.5 text-xs text-slate-500">Reader {connectionStatus === "Connected" ? "terhubung" : connectionStatus === "Connecting..." ? "menghubungkan" : "tidak terhubung"}</p>
+                  <p className="text-sm font-bold text-slate-800">Scan Buku UHF / EPC</p>
+                  <p className="mt-0.5 text-xs text-slate-500">Reader kartu {connectionStatus === "Connected" ? "terhubung" : connectionStatus === "Connecting..." ? "menghubungkan" : "tidak terhubung"}</p>
+                  <p className="mt-0.5 text-xs text-slate-500">Server UHF {uhfConnectionStatus.toLocaleLowerCase("id-ID")}</p>
                 </div>
               </div>
               <span className="shrink-0 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-bold text-blue-700">
-                Tempelkan Kartu ID
+                Tempelkan tag buku
               </span>
             </div>
             {scanMessage && <p aria-live="polite" className={`mt-3 text-xs ${scanResult === "error" ? "text-rose-700" : scanResult === "success" ? "text-emerald-700" : "text-blue-700"}`}>{scanMessage}</p>}

@@ -35,6 +35,24 @@ python lib/rfid/server.py
 
 The browser client uses `http://localhost:5000` by default. Set `NEXT_PUBLIC_RFID_API_URL` for another host or port. The reader is polled on the visitor kiosk and the staff sign-in screen. Visitor scans are checked and recorded through the Edge Function; unknown cards can use the original public registration form.
 
+### UHF book EPC reader
+
+UHF book scanning runs separately from the HF/PCSC card reader, so the kiosk and staff badge flow stay unchanged. The UHF server reads continuous inventory frames from an ELC RC04-compatible serial reader and exposes EPC polling on port `5001`. Install its only additional dependency and start it from the repository root:
+
+```powershell
+python -m pip install -r lib\rfid\requirements-uhf.txt
+python lib\rfid\uhf_server.py
+```
+
+If automatic serial detection does not find the reader, set its COM port explicitly:
+
+```powershell
+$env:UHF_SERIAL_PORT = "COM3"
+python lib\rfid\uhf_server.py
+```
+
+The reader must be configured to emit continuous inventory responses at `115200` baud. The loan page polls `http://localhost:5001` and matches the EPC against each book's registered `rfidTag` and `epcList`; the existing loan operation then records the selected EPC as before. Set `NEXT_PUBLIC_UHF_RFID_API_URL` if the server runs at another URL. The UHF HTTP server binds to loopback by default; pass `--host 0.0.0.0` only when browser clients on other machines need to reach it.
+
 ### Windows service installer
 
 Build the single-file Windows installer from a Windows x64 development machine:
