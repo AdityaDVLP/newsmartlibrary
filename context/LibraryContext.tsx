@@ -624,6 +624,10 @@ export const LibraryProvider: React.FC<{
   };
 
   const reportBackgroundDatabaseError = useCallback((operation: string, error: unknown) => {
+    if (isRlsOrPermissionError(error)) {
+      console.warn(`${operation} (RLS deferred):`, error);
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
     setDatabaseError(`${operation}: ${message}`);
     console.error(`${operation}:`, error);
@@ -840,7 +844,6 @@ export const LibraryProvider: React.FC<{
     } catch (error) {
       if (isRlsOrPermissionError(error)) {
         console.warn("Supabase member insert deferred (RLS restriction): Data tersimpan aman di cache lokal browser.", error);
-        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
         return;
       }
       // Jika terjadi error validasi duplikat (23505), batalkan state lokal dan lempar error
@@ -885,7 +888,6 @@ export const LibraryProvider: React.FC<{
     } catch (error) {
       if (isRlsOrPermissionError(error)) {
         console.warn("Supabase member update deferred (RLS restriction): Data tersimpan di cache lokal.", error);
-        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
         return;
       }
       setMembers((prev) => {
@@ -981,7 +983,6 @@ export const LibraryProvider: React.FC<{
     } catch (error) {
       if (isRlsOrPermissionError(error)) {
         console.warn("Supabase book insert deferred (RLS restriction): Buku tersimpan di cache lokal.", error);
-        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
         return;
       }
       setBooks((prev) => {
@@ -1025,7 +1026,6 @@ export const LibraryProvider: React.FC<{
     } catch (error) {
       if (isRlsOrPermissionError(error)) {
         console.warn("Supabase book update deferred (RLS restriction): Buku tersimpan di cache lokal.", error);
-        reportBackgroundDatabaseError("Akses database Supabase terbatas (RLS 42501). Data tersimpan di memori browser", error);
         return;
       }
       setBooks((prev) => {
